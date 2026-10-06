@@ -14,13 +14,14 @@ Each header includes only headers above it, which is also the reading order.
 
 | Header | Holds | Includes |
 |---|---|---|
-| `Dot11.h` | frame builders/parsers, IE walker, `parse_rsn`/`RsnInfo`, `DupDetector`, `SeqCounter`, MSDU<->Ethernet | — |
+| `Dot11.h` | frame builders/parsers, IE walker, `parse_rsn`/`RsnInfo`, HT/WMM elements, ADDBA request/response, `DupDetector`, `SeqCounter`, MSDU<->Ethernet | — |
+| `Reorder.h` | `RxReorder`: one Block Ack agreement's receive reorder buffer (window, BAR, timeout) | — |
 | `BssTable.h` | per-BSSID scan table, `select()`/`select_open()` | Dot11 |
 | `CryptoOps.h` | the crypto interface (CCM, HMAC-SHA1, PBKDF2, key unwrap) | — |
 | `Ccmp.h` | CCMP AAD/nonce/header/PN, `ccmp_encrypt`/`ccmp_decrypt`, `CcmpReplay` | CryptoOps, Dot11 |
 | `Eapol.h` | EAPOL-Key format, PRF/PTK, `eapol_mic_ok`, GTK KDE, `pmk_from_psk`, `secure_wipe` | CryptoOps |
 | `Supplicant.h` | 4-way + group-key decisions, the refusal counters | CryptoOps, Dot11, Eapol |
-| `StationSm.h` | auth → assoc → 4-way → connected, timeouts, bounded TX queue | all of the above except Ccmp |
+| `StationSm.h` | auth → assoc → 4-way → connected, timeouts, bounded TX queue, HT association (`set_ht`), Block Ack agreements (`set_block_ack`, `ba_rx`) | all of the above except Ccmp and Reorder |
 
 `Ccmp.h` is not included by the state machine on purpose: the data plane
 (encrypt/decrypt, per-key PN and replay state) belongs to the caller, which
@@ -66,7 +67,8 @@ and the cell, never here.
 | `ccmp_framing` | `tests/ccmp_selftest.cpp` | Ccmp.h + both CCMP vector sets | OpenSSL |
 | `supplicant` | `tests/supplicant_selftest.cpp` | Eapol.h, Supplicant.h, the hostapd four-way | OpenSSL |
 | `station_sm` | `tests/station_sm_selftest.cpp` | StationSm.h incl. the group rekey path | OpenSSL |
-| `sta_client_headless` | `tests/sta_client.cpp --self-test` (`tests/sta_client_selftest.inc`) | the station client's scan, join/re-join policy and data plane over this core | OpenSSL, Linux |
+| `sta_client_headless` | `tests/sta_client.cpp --self-test` (`tests/sta_client_selftest.inc`) | the station client's scan, join/re-join policy and data plane over this core | OpenSSL, Linux or macOS |
+| `sta_reorder` | `tests/reorder_selftest.cpp` | Reorder.h | — |
 | `ccmp_vectors_generated` | `tests/ccmp_gen_vectors.py --check` | `tests/ccmp_vectors.h` is what the generator emits | Python3 + python-cryptography (else skipped) |
 
 The OpenSSL cells are simply not registered without OpenSSL (configure

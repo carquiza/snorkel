@@ -14,6 +14,10 @@
 set -u
 if [ "$(id -u)" != 0 ]; then echo "Run it with sudo: sudo $0"; exit 1; fi
 cd "$(dirname "$0")/.." || exit 1
+if pgrep -f devourer-sta-run.sh >/dev/null; then
+  echo "The devourer-sta daemon holds the adapter. Stop it first: just stop"
+  exit 1
+fi
 . macos/devourer-sta.conf
 . macos/devourer-sta-lib.sh
 mkdir -p logs

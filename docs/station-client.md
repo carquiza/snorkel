@@ -3,7 +3,8 @@
 The in-tree caller of the station core (`docs/station-core.md`) and of
 `IRadio::SetStationIdentity`. It joins a WPA2-PSK or open BSS through any
 `IRadio`: scan, authenticate, associate, run the four-way as the supplicant,
-and carry CCMP-protected traffic to and from the host through a TAP device.
+and carry CCMP-protected traffic to and from the host through a TAP device
+(on macOS a fake-Ethernet pair, `feth<N>`: `macos/README.md`).
 The protocol is `src/sta/`; this file owns what the core leaves to its
 integrator - the scanner, the re-join policy and the data plane.
 
@@ -42,8 +43,11 @@ sudo DEVOURER_VID=0x0e8d DEVOURER_PID=0x7612 DEVOURER_CHANNEL=6 \
      DEVOURER_STA_TAP=dvsta0 build/sta_client 60
 ```
 
-Built by the `StaClientSelftest` CMake target (Linux, OpenSSL). Station
-variables: `DEVOURER_STA_SSID`, `_PSK` (empty: open), `_TAP`,
+Built by the `StaClientSelftest` CMake target (Linux or macOS, OpenSSL).
+On macOS `DEVOURER_STA_TAP` must name `feth0`..`feth4999`: the client creates
+that interface and its peer (`feth<N+5000>`), reads the host's frames with BPF
+and writes with NDRV, and destroys both on exit. Station variables:
+`DEVOURER_STA_SSID`, `_PSK` (empty: open), `_TAP`,
 `_SCAN_CHANNELS`, `_SCAN_DWELL_MS`, `_RECONNECT`, `_BACKOFF_MS`, `_ARM`,
 `_ACK`; plus the library's `DEVOURER_*` (`examples/common/env_config.cpp`).
 SIGINT/SIGTERM (handled from the start of `main`, so a stop during bring-up
@@ -96,7 +100,15 @@ first line then reads `fault=1`.
   8822B selected with `DEVOURER_VID` / `DEVOURER_PID`; that path is not
   covered by an on-air cell here.
 - Software CCMP only; no PMF/802.11w, WPA2-PSK/CCMP or open only.
-- No fragment reassembly and no A-MSDU: both are refused and counted.
+- No fragment reassembly: fragments are refused and counted. A-MSDUs are
+  refused too, unless `DEVOURER_STA_HT` is on (an HT station must accept
+  them): then they are unpacked, and one whose first subframe DA reads as an
+  LLC/SNAP header (the A-MSDU-flip shape, CVE-2020-24588) is dropped whole.
+- 802.11n only on request: `DEVOURER_STA_HT=1` adds HT Capabilities (20 MHz,
+  MCS 0-15) and WMM to the association request when the BSS offers them.
+  `DEVOURER_STA_BA=1` accepts immediate Block Ack agreements for TID 0-7 and
+  reorders each through `src/sta/Reorder.h` before CCMP; otherwise every
+  ADDBA is declined. No VHT, no TX aggregation.
 - One BSS at a time, chosen by SSID; no roaming and no background scan while
   associated (a retune would lose the association).
 - A pairwise rekey can cost one received frame (802.11-2016 12.7.6.5); the

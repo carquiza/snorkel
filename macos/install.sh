@@ -43,9 +43,11 @@ if [ ! -s "$CONF_DIR/psk" ]; then
   chmod 600 "$CONF_DIR/psk"
 fi
 
+[ -f "$CONF_DIR/mode" ] || echo auto > "$CONF_DIR/mode"
+chmod 644 "$CONF_DIR/mode"
 install -o root -g wheel -m 644 macos/com.openipc.devourer-sta.plist "$PLIST"
 touch /var/log/devourer-sta.log /var/log/devourer-sta-daemon.log
 chmod 644 /var/log/devourer-sta.log /var/log/devourer-sta-daemon.log
 launchctl bootstrap system "$PLIST" && launchctl enable system/$LABEL
 echo "Installed and started. Logs: /var/log/devourer-sta.log and /var/log/devourer-sta-daemon.log"
-echo "Stop it with: sudo macos/uninstall.sh"
+echo "Mode: $(cat "$CONF_DIR/mode"). Check it with: just status"

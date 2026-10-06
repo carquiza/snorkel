@@ -44,3 +44,8 @@ default_route_if() {
 dhcp_router() {
   ipconfig getoption "$1" router 2>/dev/null
 }
+
+# "On" or "Off" for Wi-Fi device $1.
+wifi_power() {
+  networksetup -getairportpower "$1" 2>/dev/null | awk '{print $NF}'
+}

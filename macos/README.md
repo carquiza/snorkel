@@ -1,78 +1,229 @@
 # devourer station on macOS — Archer T3U Plus on a Mac mini 2014
 
-**Updated:** 2026-10-06 · **Phase:** Block Ack on air · **Health:** 0 drops; down 18.9 / up 2.2 Mbps (en1 0.2 / 0.0 in the same run); upload is the weak side
+**Updated:** 2026-10-07 · **Phase:** daemon + switch-over commands, not yet run on air · **Health:** link proven on air — 0 drops, down 18.9 / up 2.2 Mbps with 802.11n + Block Ack; upload is the weak side
 
-Goal: use the TP-Link Archer T3U Plus (RTL8822BU, `2357:0138`) as this Mac's
-Wi-Fi on macOS 12 with SIP **on**. The Realtek kext cannot load on Monterey
-without SIP off, and SIP can only be changed from Recovery, which needs a
-keyboard and screen this machine does not have. devourer runs the chip from
-user space over libusb instead, so no kext and no SIP change.
+This makes a TP-Link **Archer T3U Plus** (RTL8822BU, USB `2357:0138`) the Wi-Fi
+of a Mac mini 2014 on **macOS 12 with SIP on**. TP-Link's Realtek kext cannot
+load on Monterey without SIP off, and SIP can only be changed from Recovery,
+which needs a keyboard and screen this headless Mac does not have. devourer
+drives the chip from user space over libusb instead: no kext, no SIP change.
 
-## Shape
+The station client (`tests/sta_client.cpp`) scans, joins with WPA2-PSK, runs
+CCMP in software, and hands Ethernet frames to macOS through a fake-Ethernet
+interface, `feth0`. A launchd daemon keeps it running and routes internet
+traffic over it. The built-in Wi-Fi (`en1`) stays as the fallback, or can be
+switched off.
+
+## Quick start
+
+Needs: Homebrew `libusb`, `openssl@3`, `cmake`, `ninja`, `just`; the AP's
+password saved in the System keychain (the Mac joined it once before).
 
 ```
-router ⇄ T3U Plus ⇄ libusb ⇄ sta_client ⇄ feth5000 ⇄ feth0 ⇄ macOS IP stack
-                              (scan, join,   BPF read      DHCP, ARP, routes
-                               WPA2, CCMP)   NDRV write
+cd ~/Source/devourer
+just test             # build + headless tests, no adapter needed
+just install          # build, store the password root-only, start the daemon
+just status           # wait ~20 s: feth0 should have an address
 ```
 
-- `feth0`/`feth5000` is a macOS fake-Ethernet pair (as ZeroTier uses). The host
-  side, `feth0`, carries the radio's MAC, so the AP sees the frames the host
-  sends as coming from the associated station.
-- `sta_client` creates the pair on start and destroys it on exit. Needs root.
-- The built-in Wi-Fi (`en1`) stays associated as the fallback.
+Then, to run on the adapter alone, see [Switching over](#switching-over).
 
-## Plan
+## Commands
 
-1. **Band switch bug** — Jaguar2 `set_channel_bw` keeps RF18 band bits 16/8
-   from the previous register value on 5 GHz, but clears them on 2.4 GHz, so a
-   2.4 → 5 GHz retune leaves the synth in 2.4 GHz mode. Set them explicitly.
-2. **macOS data plane** — `tap_open` on macOS: create the feth pair, BPF on the
-   peer for host → radio, NDRV for radio → host.
-3. **Transmit rate** — start unicast at 54M and let the firmware's retry ladder
-   step down (`DEVOURER_TX_RETRY_FALLBACK` default). Association stays legacy
-   (no HT/VHT IEs), so the AP's downlink is capped at 54 Mbps as well.
-4. **Routing** — DHCP on `feth0` via `ipconfig set feth0 DHCP`; when the link
-   is healthy make it primary over `en1`, and drop back when it is not.
-5. **Start at boot** — a launchd daemon runs `devourer-sta-run.sh`, which loops
-   the client, runs DHCP, and watches the link.
+All from the repo root. The ones that change the system ask for your password.
 
-## Files
-
-| File | Role |
+| Command | What it does |
 |---|---|
-| `macos/sta-datapath-test.sh` | one-shot root test: client + feth + DHCP + ping/speed, auto teardown |
-| `macos/devourer-sta-run.sh` | the daemon body (loop, DHCP, primary-route watchdog) |
-| `macos/install.sh` / `uninstall.sh` | copy binary + scripts, store the PSK root-only, load the daemon |
-| `macos/com.openipc.devourer-sta.plist` | launchd job |
+| `just` | List the commands |
+| `just build` | Build `build/sta_client` |
+| `just test` | Build and run the 8 headless station test suites |
+| `just datapath-test` | One-shot on-air test (~3 min): join, DHCP, ping, speed vs `en1`, default-route switch; writes `logs/datapath-*`. Needs the daemon stopped. |
+| `just install` | Build, install and start the daemon. Re-run after any code change. Keeps an edited config. |
+| `just uninstall` | Remove the daemon, its files and the stored password; turns `en1` on |
+| `just start` / `just stop` / `just restart` | Control the installed daemon. Stopping turns `en1` on. |
+| `just status` | Daemon, mode, both interfaces, routes, DNS, last link line, last daemon lines |
+| `just logs` | Follow both logs |
+| `just link` | Follow only state changes, Block Ack events and the 2 s link lines |
+| `just wifi-off` | Mode `adapter`: built-in Wi-Fi off, everything on the adapter (checked first) |
+| `just wifi-on` | Mode `auto`: built-in Wi-Fi on, internet on the adapter while healthy |
+| `just use-builtin` | Mode `builtin`: built-in Wi-Fi carries everything; adapter idle |
+| `just config` | Edit the installed config, then restart the daemon |
 
-## Findings (on air, 2026-10-06)
+## Switching over
+
+The intended routine: log in over the built-in Wi-Fi, then move to the adapter.
+
+1. Connect (Screen Sharing or SSH) to the Mac's built-in Wi-Fi address.
+2. `just status` — check `daemon: running` and that `adapter feth0` has an
+   address. Note that address: you reconnect to it in step 4.
+3. `just wifi-off`. It refuses unless the adapter reaches the router (2 of 3
+   pings) and the internet (1.1.1.1) right now. Then it prints the address to
+   reconnect to and sets mode `adapter`.
+4. Within about 10 s the built-in Wi-Fi turns off and your session drops.
+   Reconnect to the adapter's address (or `<LocalHostName>.local`).
+
+**Failsafes in mode `adapter`** (the daemon checks every 5 s):
+
+| Condition | What the daemon does |
+|---|---|
+| Adapter link down (router silent on `feth0`) for 30 s | Built-in Wi-Fi on. When the link recovers, off again. |
+| Link up but no internet (ping 1.1.1.1 + DNS) for 30 s | Built-in Wi-Fi on, mode set back to `auto` |
+| `sta_client` exits or restarts | Built-in Wi-Fi on until it is healthy again |
+| Daemon stops (`just stop`, `uninstall`, crash) | Built-in Wi-Fi on |
+
+The mode survives a reboot: in `adapter` mode the built-in Wi-Fi comes up at
+boot and is switched off once the adapter is healthy. If you lose the Mac
+entirely, power-cycle it: the built-in Wi-Fi is on at every boot.
+
+`just wifi-on` returns to `auto`. In `auto` LAN traffic (including Screen
+Sharing to the built-in address) stays on the built-in Wi-Fi and internet
+traffic uses the adapter.
+
+## Modes
+
+| Mode | Built-in Wi-Fi | Internet traffic | LAN traffic |
+|---|---|---|---|
+| `auto` (default) | on | adapter while it answers, else built-in | built-in |
+| `adapter` | off while the adapter is healthy | adapter | adapter |
+| `builtin` | on | built-in | built-in |
+
+Stored in `/usr/local/etc/devourer-sta/mode`; `just wifi-off` / `wifi-on` /
+`use-builtin` write it.
+
+## Configuration
+
+`macos/devourer-sta.conf` is the default; the installed copy is
+`/usr/local/etc/devourer-sta/devourer-sta.conf` (`just config`).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `SSID` | `MyNetwork` | Network to join. Its password is read from the System keychain at install. |
+| `CHANNEL` | `48` | Channel to start on. Start in the AP's band: a 2.4 ↔ 5 GHz start costs a scan. |
+| `SCAN_CHANNELS` | `36,40,44,48` | Where to look for the AP after losing it |
+| `HT` | `1` | 802.11n association (HT Capabilities + WMM). `0` = legacy 802.11a/g. |
+| `BA` | `1` | Accept Block Ack (A-MPDU) agreements. `0` declines them. Needs `HT=1`. |
+| `TX_RATE` | `MCS3` | Rate for our data frames (`6M`..`54M`, `MCS0`..`MCS15`); the firmware steps down on retries |
+| `BASE_RATE` | `6M` | Rate for management, WPA2 handshake and broadcast frames |
+| `ACK_RATES` | `0x10` | Rates the chip may ACK with (RRSR bits; `0x10` = 6M only) |
+| `IGI_MAX` | `50` | Ceiling of the receiver's gain control (DIG) |
+| `IFACE` | `feth0` | Host-side interface; its peer is `feth<N+5000>` |
+| `VID` / `PID` | `0x2357` / `0x0138` | The adapter's USB ID |
+
+A new SSID needs its password stored again: `just uninstall`, edit
+`macos/devourer-sta.conf`, `just install`.
+
+## Reading the logs
+
+`/var/log/devourer-sta.log` is the client; `/var/log/devourer-sta-daemon.log`
+is the daemon (routes, Wi-Fi power, DNS, restarts). The client log restarts
+at 20 MB (the old one is kept as `.1`).
+
+- `station state: Connected t=12.345` — every state change. A failure names
+  its reason: `beacon-lost`, `deauthenticated` (with the AP's `status`),
+  `auth-timeout`, `assoc-refused`, `handshake-timeout`, ...
+- `block ack: TID 0 started t=... ssn=... win=64` / `ended` — the AP opened or
+  closed an aggregation agreement.
+- `link:` every 2 s:
+
+  | Field | Meaning |
+  |---|---|
+  | `igi` | receiver gain index (0x1c = most sensitive) |
+  | `fa` | false alarms in the last DIG window |
+  | `ap_rssi` | AP signal, dBm (approximate) |
+  | `rx` / `dup` / `tx` | encrypted frames from the AP, duplicates dropped, frames we queued |
+  | `ht` / `legacy` / `mcs_max` | data frames to us by PHY, and the highest MCS seen |
+
+- The ledger at exit: joins, the four-way, CCMP counters, `ht:` (ADDBA
+  declined, A-MSDUs), `block ack:` (agreements, DELBAs, reorder holes), TAP
+  and TX counters.
+
+## How it works
+
+```
+AP ⇄ T3U Plus ⇄ libusb ⇄ sta_client ⇄ feth5000 ⇄ feth0 ⇄ macOS IP stack
+                         scan, join,    BPF read     DHCP, ARP, routes
+                         WPA2, CCMP,    NDRV write
+                         reorder
+```
+
+- **Interface.** macOS has no TAP device. `sta_client` creates a fake-Ethernet
+  pair: the host stack owns `feth0`, which carries the radio's MAC; the
+  client owns the peer, reading what the host sends with BPF and writing what
+  it receives with an NDRV socket (the method ZeroTier uses). Needs root.
+- **Station.** The device-free core in `src/sta/` (`StationSm`, `Supplicant`,
+  `Ccmp`, `BssTable`, `Reorder`). The chip ACKs and BlockAcks frames for our
+  address once the client arms the station identity.
+- **802.11n.** The association request carries HT Capabilities (20 MHz,
+  MCS 0–15, short GI, RX STBC) and WMM. A-MSDUs are unpacked, with the
+  A-MSDU-flip guard (CVE-2020-24588). No VHT: the radio is tuned at 20 MHz.
+- **Block Ack.** Immediate-policy agreements for TID 0–7 are accepted with a
+  window of up to 64. `src/sta/Reorder.h` puts A-MPDU frames back in sequence
+  order before CCMP and gives up on a hole on a BlockAckReq, a window slide or
+  after 100 ms. Our own transmissions are not aggregated.
+- **Rates.** Management, EAPOL and broadcast go at `BASE_RATE`; our data at
+  `TX_RATE` with the firmware's MCS3 → 2 → 1 → 0 fallback. The chip ACKs at
+  6M (`ACK_RATES`) because the AP hears us about 5 dB weaker than we hear it.
+- **Routing.** DHCP on `feth0` through `ipconfig`. Internet goes over two
+  half-default routes (0/1, 128/1) via `-ifp feth0`, which override the
+  default route without touching it: macOS ignored `PrimaryRank` for this
+  interface. When the built-in Wi-Fi is off and macOS has no DNS left, the
+  daemon publishes `feth0`'s DHCP answers as its own network service in the
+  dynamic store, the way VPN up-scripts do.
+
+**Installed files:** `/usr/local/libexec/devourer-sta/` (binary, daemon,
+helpers; root-owned), `/usr/local/etc/devourer-sta/` (config, mode, and `psk`
+with mode 600), `/Library/LaunchDaemons/com.openipc.devourer-sta.plist`,
+`/var/log/devourer-sta*.log`.
+
+## Troubleshooting
+
+| Symptom | Check / fix |
+|---|---|
+| `just status` shows no `feth0` address | `just link`: is there a `Connected` line? If not, the `Failed` line names the reason. Wrong password: `just uninstall`, then `just install`. |
+| `wifi-off` refused | It says why. Usually the link is still joining: wait 20 s, then `just status`. |
+| Lost the Mac after `wifi-off` | Wait 30–60 s for the failsafe, then reconnect to the built-in address. Last resort: power-cycle. |
+| `datapath-test` says the daemon holds the adapter | `just stop`, run the test, `just start` |
+| Slow upload | Expected (see Known limits). Moving the adapter into the open helps more than any setting. |
+| After a macOS update | `just install` again (rebuilds against the current SDK) |
+
+## Development
+
+- `just build` turns off the Jaguar1 and RTL8733B backends: AppleClang 14
+  (Xcode 14, macOS 12) has no `std::jthread`. The 8822B is Jaguar2.
+- `just test` runs `sta_client_headless`, `station_sm`, `supplicant`,
+  `ccmp_framing`, `dot11_frames`, `bss_table`, `sta_reorder`, `station_arm`.
+  The full `ctest` passes except `noise_floor_math`, which AppleClang 14
+  cannot compile (unrelated).
+- Client switches added for macOS: `DEVOURER_STA_TAP=feth<N>`,
+  `DEVOURER_STA_BASE_RATE`, `DEVOURER_STA_ACK_RATES`, `DEVOURER_STA_HT`,
+  `DEVOURER_STA_BA`, `DEVOURER_STA_LINK_LOG`, `DEVOURER_STA_SCAN_LOG`, and
+  `DEVOURER_IGI_MAX` (library). By hand:
+  `sudo DEVOURER_STA_PSK=... DEVOURER_VID=0x2357 DEVOURER_PID=0x0138 DEVOURER_CHANNEL=48 DEVOURER_STA_SSID=MyNetwork DEVOURER_STA_TAP=feth0 build/sta_client 60`
+- Work is on the local branch `macos-sta-spike`.
+
+## Measurements (on air, 2026-10-05 / 06)
+
+AP `MyNetwork` on channel 48 at about -70 dBm to the adapter; the built-in Wi-Fi
+saw it at -77 dBm.
 
 | Run | Result |
 |---|---|
-| 54M for everything | 23 joins failed in 45 s → management/EAPOL now at `BASE_RATE` 6M |
-| 24M data, 6M base | join 3 s, DHCP 3–6 s, ping router 0% loss 4–7 ms; down 5 / up 1.7 Mbps (en1: 17 / 6.6) |
-| drops | 13 in 2 min, all `beacon-lost` while thousands of AP frames arrived: `StationSm::tick` got a clock older than the RX thread's last stamp and the unsigned diff wrapped. Fixed (`StationSm::elapsed`, cell `test_tick_behind_the_last_frame`). |
-| DIG | IGI sat at the 0x1c floor throughout: not the cause. `IGI_MAX` kept as a guard. |
-| duplicates | 15–100% of AP frames arrived twice (Retry bit): AP misses our ACKs. TX power is the world-wide-min limit (index 30 ≈ 15 dBm at ch48). `ACK_RATES=0x10` makes the chip ACK at 6M. |
-| default route | `PrimaryRank Last` on en1 did not move it; 0/1 + 128/1 via `-ifp feth0` did. |
-| after the tick fix | 0 drops in 2 min, 1 join; down 9.4 / up 1.8 Mbps; still ~20% duplicates |
-| HT on (MCS3 up, ADDBA declined) | down 15.6 / up 4.6 Mbps (from 9.4 / 1.8); duplicates 47 of 55,922 (from 11,190); 9 ADDBA declined, 0 A-MSDU. The run's rate counter read DESC_RATE as an AX code and called every frame legacy - fixed after the run. |
-| Block Ack on | down 18.9 Mbps (16.4 as default route), up 2.2; 54,510 HT frames to 8 legacy, MCS up to 12; ~2,700 frames/s at peak; 0 duplicates, 0 MIC failures; 3 agreements, 2 DELBAs (AP idle teardown, to confirm). en1 stalled to 0.2 / 0.0 in the same run. |
-| TX power | Local limit: 200 mW EIRP in 5150–5350 MHz, the ETSI figure. The rfe_type 3 table allows 32 (ETSI) vs the 30 (MKK) world-wide min in use: +1 dB, not worth it. |
+| Legacy, 54M for everything | 23 joins failed in 45 s → management/EAPOL now at `BASE_RATE` 6M |
+| Legacy, 24M data | join 3 s, DHCP 3–6 s, ping router 0% loss 4–7 ms; down 5 / up 1.7 Mbps; 13 drops in 2 min |
+| The drops | all `beacon-lost` while thousands of AP frames arrived: `StationSm::tick` got a clock older than the RX thread's last stamp and the unsigned difference wrapped. Fixed (`StationSm::elapsed`). After: 0 drops. |
+| DIG | IGI at the 0x1c floor throughout: not a cause. `IGI_MAX` kept as a guard. |
+| Duplicates ~20% | the AP missed our ACKs → `ACK_RATES=0x10`; then fixed outright by HT |
+| HT on, ADDBA declined | down 15.6 / up 4.6 Mbps (en1 22.1 / 7.1); duplicates 47 of 55,922 |
+| HT + Block Ack | down 18.9 (16.4 as default route) / up 2.2 Mbps; 54,510 HT frames to 8 legacy, MCS up to 12; ~2,700 frames/s at peak; 0 duplicates, 0 MIC failures. en1 stalled to 0.2 / 0.0 in the same run. |
+| Default route | `PrimaryRank Last` on en1 did not move it; 0/1 + 128/1 via `-ifp feth0` did |
+| TX power | Local limit: 200 mW EIRP in 5150–5350 MHz, the ETSI figure. This board's table allows index 32 (ETSI) vs the 30 (MKK) world-wide minimum in use: +1 dB, not worth it. |
 
 ## Known limits
 
-- 802.11n (`HT=1`): HT Capabilities (20 MHz, MCS 0-15, SGI20, RX STBC) + WMM in
-  the association request; A-MSDUs are unpacked (with the A-MSDU-flip guard).
-  No VHT (80 MHz is not tuned).
-- Block Ack (`BA=1`): immediate-policy ADDBA for TID 0-7 accepted with a window
-  of up to 64; the BlockAck frames are the chip's (station arm = MACID gate,
-  docs/aggregation.md). `src/sta/Reorder.h` puts frames back in sequence order
-  before CCMP, follows BAR and DELBA, and gives up on a hole after 100 ms.
-  A-MSDU inside A-MPDU is not offered. Receive only: our own TX is not
-  aggregated.
-- One BSS by SSID, no roaming; 2.4 GHz + 5 GHz scan works after fix 1.
-- Firmware logs `LCK TIMEOUT (LO not locked!)` at bring-up; RX/TX still work.
-- TX power stays at the world-wide-minimum regulatory limit; raising it
-  (`DEVOURER_TX_PWR`) is the owner's regulatory call, not a default.
+- Upload (2–5 Mbps) is limited by how well the AP hears us: TX power is at
+  the legal limit, and `TX_RATE` is fixed with only the firmware's fallback —
+  no rate control from TX reports yet.
+- No VHT (802.11ac): the radio tunes 20 MHz only. No TX aggregation.
+- One BSS by SSID, no roaming. PMF (802.11w) and WPA3 are not supported.
+- `wifi-off` and the DNS fallback are written but not yet run on air.
+- The firmware logs `LCK TIMEOUT (LO not locked!)` at bring-up; RX and TX work.

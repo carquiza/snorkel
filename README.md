@@ -270,7 +270,8 @@ extended range). Then pick the one thing you came for: building a video link →
 [adaptive link](docs/adaptive-link.md); surviving interference →
 [FHSS](docs/fhss.md); getting more range →
 [narrowband](docs/narrowband.md); coordinating several radios →
-[time distribution](docs/time-distribution.md); making the driver itself do
+[time distribution](docs/time-distribution.md); using an adapter as a Mac's
+Wi-Fi with no kext → [macOS station](macos/README.md); making the driver itself do
 something new → [visual driver primer](docs/driver-primer.md), then
 [logging](docs/logging.md) for the event schema every test script reads. If a
 chip is misbehaving, skip to [adapter doctor](docs/adapter-doctor.md) and the
