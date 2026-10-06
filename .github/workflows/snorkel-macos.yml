@@ -1,0 +1,39 @@
+# Snorkel: build the station client on macOS and run the headless station
+# tests (no adapter needed) — the same build and tests as `just test`.
+name: snorkel-macos
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  station:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install libusb openssl@3 ninja
+
+      - name: Check the scripts' syntax
+        run: for f in macos/*.sh; do bash -n "$f"; done
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_8733B=OFF
+          -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+
+      - name: Build
+        run: >
+          ninja -C build StaClientSelftest StationSmSelftest SupplicantSelftest
+          CcmpSelftest Dot11Selftest BssTableSelftest ReorderSelftest
+          StationArmSelftest
+
+      - name: Test
+        working-directory: build
+        run: >
+          ctest --output-on-failure
+          -R "sta_client_headless|station_sm|supplicant|ccmp_framing|dot11_frames|bss_table|sta_reorder|station_arm"

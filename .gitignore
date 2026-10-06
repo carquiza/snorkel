@@ -23,3 +23,6 @@ tests/.uhd_args
 # Local run output (macos/sta-datapath-test.sh, ad-hoc captures)
 logs/
 scratch/
+
+# macOS Finder metadata
+.DS_Store
