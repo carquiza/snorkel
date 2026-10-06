@@ -201,6 +201,18 @@ public:
    * nothing - where not ported (the default; only Jaguar3 implements it). A
    * failed register read throws, like every register read, mid-dump. */
   virtual bool DumpMacRegisters() { return false; }
+  /* The rates the MAC may answer with (ACK, CTS, BlockAck): REG_RRSR
+   * (0x0440) bits [19:0], one bit per rate in rtw88 order - 1M 2M 5.5M 11M,
+   * then 6M (bit 4) 9M 12M 18M 24M 36M 48M 54M, then HT. The responder picks
+   * the highest set rate not above the frame it answers. A station on a weak
+   * link wants only the lowest basic rate: an ACK the AP cannot decode is a
+   * retransmission. `previous`, when not null, receives the old bits so the
+   * caller can restore them. Returns false where not ported (the default). */
+  virtual bool SetResponseRates(uint32_t mask, uint32_t* previous) {
+    (void)mask;
+    (void)previous;
+    return false;
+  }
   /* Read the chip's internal packet memory through the debug window
    * (REG_PKTBUF_DBG_CTRL + 0x8000..0x8FFF), a port of halmac read_buf_88xx.
    * `sel` 0 = TX FIFO, 1 = the LLT (the linked list that chains TX pages).

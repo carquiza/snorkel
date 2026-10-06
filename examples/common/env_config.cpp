@@ -138,6 +138,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.rx.abs_noise_floor = env_flag("DEVOURER_RX_NOISE_FLOOR");
   if (env_long("DEVOURER_IGI", &v))
     cfg.rx.igi = static_cast<uint8_t>(v & 0x7f);
+  if (env_long("DEVOURER_IGI_MAX", &v))
+    cfg.rx.igi_max = static_cast<uint8_t>(v & 0x7f);
   if (const char *e = env_str("DEVOURER_ACK_RESPONDER"))
     cfg.rx.ack_responder = devourer::parse_mac(e);
 

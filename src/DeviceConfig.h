@@ -184,6 +184,10 @@ struct DeviceConfig {
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
     std::optional<uint8_t> igi;
+    /* env: DEVOURER_IGI_MAX — Jaguar2 DIG ceiling (unset = 0x3e). A station
+     * hearing its AP near raw RSSI r wants about r + 10, as phydm caps a
+     * connected DIG: above that the receiver goes deaf to its own AP. */
+    std::optional<uint8_t> igi_max;
     /* env: DEVOURER_ACK_RESPONDER=<unicast mac> — arm the hardware ACK
      * responder at the end of bring-up (src/AckResponder.h): the MAC
      * auto-ACKs unicast frames addressed to this MAC while monitor RX and

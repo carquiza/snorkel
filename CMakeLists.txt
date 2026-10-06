@@ -1054,7 +1054,7 @@ if(OpenSSL_FOUND)
     # "Selftest" so the `selftests` aggregate collects it, and `--self-test`
     # runs its headless cells before libusb is touched (no adapter, no root).
     # Linux-only: the data plane is a TAP device (<linux/if_tun.h>).
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
         add_executable(StaClientSelftest
             tests/sta_client.cpp
             examples/common/env_config.cpp

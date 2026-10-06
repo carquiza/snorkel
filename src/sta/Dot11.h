@@ -47,6 +47,7 @@ enum : uint8_t {
   kFcDisassoc = 0xa0,
   kFcAuth = 0xb0,
   kFcDeauth = 0xc0,
+  kFcAction = 0xd0,
   kFcData = 0x08,
   kFcQosData = 0x88,
 };
@@ -75,6 +76,7 @@ enum : uint8_t {
   kEidHtOperation = 61,
   kEidVhtCaps = 191,
   kEidVhtOperation = 192,
+  kEidVendor = 221,
 };
 
 inline void put_le16(std::vector<uint8_t>& v, uint16_t x) {
@@ -531,6 +533,11 @@ struct BssInfo {
   uint16_t rsn_capabilities = 0;
   RsnInfo rsn;  /* the whole element, for a caller that wants more than the
                  * one verdict above */
+  /* 802.11n: the BSS sends HT Capabilities, and the WMM element (vendor
+   * 00:50:F2 type 2) that real APs require before they use HT rates with a
+   * station - an HT station without WMM is served at legacy rates. */
+  bool has_ht = false;
+  bool has_wmm = false;
 };
 
 /* A channel number this station can tune and pick a band for: 1..14 is
@@ -608,6 +615,18 @@ inline bool parse_beacon(const uint8_t* frame, size_t len, BssInfo* out) {
                         !out->rsn.mfp_required;
     out->rsn_capabilities = out->rsn.capabilities;
     out->rsn_mfp_required = out->rsn.mfp_required;
+  }
+  out->has_ht = find_ie(body, body_len, kEidHtCaps, &ie_len) != nullptr;
+  /* WMM is one of possibly many vendor elements, so every one is walked;
+   * find_ie stops at the first. */
+  for (size_t i = 0; i + 2 <= body_len;) {
+    const uint8_t id = body[i], l = body[i + 1];
+    if (i + 2 + l > body_len) break;
+    const uint8_t* v = body + i + 2;
+    if (id == kEidVendor && l >= 4 && v[0] == 0x00 && v[1] == 0x50 &&
+        v[2] == 0xf2 && v[3] == 0x02)
+      out->has_wmm = true;
+    i += 2 + l;
   }
   return true;
 }
@@ -687,11 +706,40 @@ inline std::vector<uint8_t> build_auth_req(const uint8_t own[6],
 /* Association request. `capability` must claim ESS, and Privacy when the BSS
  * advertises RSN — an association request whose Privacy bit disagrees with the
  * RSN element it carries is refused by a conforming AP. */
+/* HT Capabilities for a 20 MHz station (802.11-2016 9.4.2.56), the RTL8822B's
+ * receive side: two spatial streams (MCS 0-15), short GI at 20 MHz, one-stream
+ * RX STBC, SM power save disabled. No 40 MHz - the station tunes 20 MHz, and
+ * an AP told otherwise would send 40 MHz frames it cannot hear. No LDPC, no
+ * greenfield, 3839-byte A-MSDUs. The A-MPDU fields are stated but unused:
+ * this station declines every Block Ack agreement (build_addba_decline). */
+inline void append_ht_caps_sta(std::vector<uint8_t>& m) {
+  uint8_t b[26] = {0};
+  const uint16_t cap = 0x000c   /* SM power save: disabled */
+                     | 0x0020   /* short GI for 20 MHz */
+                     | 0x0100;  /* RX STBC: one spatial stream */
+  b[0] = (uint8_t)(cap & 0xff);
+  b[1] = (uint8_t)(cap >> 8);
+  b[2] = (5u << 2) | 3u;        /* A-MPDU: 4 us spacing, 64 KiB */
+  b[3] = 0xff;                  /* RX MCS 0-7 */
+  b[4] = 0xff;                  /* RX MCS 8-15 */
+  b[15] = 0x01;                 /* TX MCS set defined, equal to RX */
+  append_ie(m, kEidHtCaps, b, sizeof b);
+}
+
+/* The WMM Information Element a station sends (WMM spec 2.2.1): OUI
+ * 00:50:F2, type 2, subtype 0, version 1, QoS Info 0 (no U-APSD). */
+inline void append_wmm_sta(std::vector<uint8_t>& m) {
+  const uint8_t b[7] = {0x00, 0x50, 0xf2, 0x02, 0x00, 0x01, 0x00};
+  append_ie(m, kEidVendor, b, sizeof b);
+}
+
 inline std::vector<uint8_t> build_assoc_req(const uint8_t own[6],
                                             const uint8_t bssid[6],
                                             const std::string& ssid,
                                             bool rsn, bool five_ghz,
-                                            uint16_t listen_interval = 10) {
+                                            uint16_t listen_interval = 10,
+                                            bool ht = false,
+                                            bool wmm = false) {
   std::vector<uint8_t> m = mgmt_hdr(kFcAssocReq, bssid, own, bssid);
   put_le16(m, (uint16_t)(0x0001 | (rsn ? 0x0010 : 0))); /* ESS | Privacy */
   put_le16(m, listen_interval);
@@ -703,9 +751,36 @@ inline std::vector<uint8_t> build_assoc_req(const uint8_t own[6],
   append_ext_supported_rates_sta(m, five_ghz);
   /* The RSN element goes AFTER the rates, and anything that follows it must
    * still be emitted on every cipher path: an association request that drops
-   * its HT/VHT/ExtCap tail is refused or downgraded by the AP. There is no
-   * tail here yet; one added later belongs below this line, not above it. */
+   * its HT/VHT/ExtCap tail is refused or downgraded by the AP. The tail
+   * (HT, WMM) is below this line and independent of `rsn`. */
   if (rsn) append_rsn_ccmp_psk(m);
+  /* Element order (802.11-2016 Table 9-27): HT Capabilities after RSN,
+   * vendor-specific elements last. */
+  if (ht) append_ht_caps_sta(m);
+  if (wmm) append_wmm_sta(m);
+  return m;
+}
+
+/* An ADDBA Response that declines (status 37, "request declined") the
+ * request in `req_body` - the Action frame body: category 3, action 0,
+ * dialog token, Block Ack Parameter Set, timeout, starting sequence. Returns
+ * empty for a body too short to be one. Declining is the whole Block Ack
+ * story here: the receive path has no reorder buffer, and an AP that is
+ * refused keeps sending single MPDUs at HT rates. */
+inline std::vector<uint8_t> build_addba_decline(const uint8_t own[6],
+                                                const uint8_t bssid[6],
+                                                const uint8_t* req_body,
+                                                size_t req_len) {
+  if (!req_body || req_len < 9 || req_body[0] != 3 || req_body[1] != 0)
+    return {};
+  std::vector<uint8_t> m = mgmt_hdr(kFcAction, bssid, own, bssid);
+  m.push_back(3);            /* category: Block Ack */
+  m.push_back(1);            /* action: ADDBA Response */
+  m.push_back(req_body[2]);  /* dialog token */
+  put_le16(m, 37);           /* status: request declined */
+  m.push_back(req_body[3]);  /* Block Ack Parameter Set, echoed */
+  m.push_back(req_body[4]);
+  put_le16(m, 0);            /* timeout */
   return m;
 }
 

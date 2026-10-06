@@ -259,6 +259,8 @@ class StationSm {
     std::memcpy(bssid_, bss.info.bssid, 6);
     if (security_ == Security::Wpa2Psk) std::memcpy(snonce_, snonce, 32);
     channel_ = bss.info.channel;
+    bss_ht_ = bss.info.has_ht;
+    bss_wmm_ = bss.info.has_wmm;
     {
       /* Ten of THIS BSS's beacon intervals (1 TU = 1.024 ms), never less
        * than the kBeaconLossMs floor, and with the interval capped at
@@ -371,6 +373,19 @@ class StationSm {
         if (!parse_reason(frame, len, &reason)) { rx_malformed++; return; }
         fail(Failure::Deauthenticated, reason);
         authenticated_ = false;   /* the AP has already let us go */
+        return;
+      }
+      /* An HT AP opens a Block Ack agreement after association. It is
+       * answered "declined" rather than left unanswered: an unanswered
+       * request is retried, and some APs stall the TID until it resolves.
+       * Without HT the AP has no reason to ask; anything else is ignored. */
+      case kFcAction: {
+        if (!to_us || state_ != State::Connected) { rx_ignored++; return; }
+        std::vector<uint8_t> m =
+            build_addba_decline(own_, bssid_, frame + 24, len - 24);
+        if (m.empty()) { rx_ignored++; return; }
+        assign_seq(m, seq_.next());
+        if (queue(std::move(m))) addba_declined++;
         return;
       }
       default:
@@ -503,8 +518,20 @@ class StationSm {
 
   /* Drive timeouts and retransmissions. Call it as often as convenient; it
    * does nothing until a deadline has passed. */
+  /* Milliseconds from `then` to `now`, and 0 when `then` is the later one.
+   * A caller that receives on one thread and ticks on another stamps each
+   * frame with a fresh clock read, while the tick carries one taken a little
+   * earlier - so `then` can lead `now` by a few ms. Plain unsigned subtraction
+   * turns that into ~49 days, and a link carrying thousands of frames a
+   * second failed as BeaconLost every few seconds (measured on macOS,
+   * 13 drops in 2 minutes, all under load). */
+  static uint32_t elapsed(uint32_t now, uint32_t then) {
+    const int32_t d = (int32_t)(now - then);
+    return d > 0 ? (uint32_t)d : 0;
+  }
+
   void tick(uint32_t now_ms) {
-    const uint32_t since = (uint32_t)(now_ms - last_tx_ms_);
+    const uint32_t since = elapsed(now_ms, last_tx_ms_);
 
     switch (state_) {
       case State::Authenticating:
@@ -529,7 +556,7 @@ class StationSm {
          * deauth, and an AP that is switched off leaves the station reporting
          * a link that does not exist - the caller sees keyed() forever and
          * has no hook to notice. */
-        if ((uint32_t)(now_ms - last_heard_ms_) >= beacon_loss_ms_)
+        if (elapsed(now_ms, last_heard_ms_) >= beacon_loss_ms_)
           fail(Failure::BeaconLost, 0);
         return;
       default:
@@ -586,6 +613,14 @@ class StationSm {
   uint32_t rx_protected = 0;
   uint32_t rx_malformed = 0;
   uint32_t tx_dropped = 0;
+  uint32_t addba_declined = 0;  /* Block Ack requests answered "declined" */
+
+  /* 802.11n. Off by default. On, an association with a BSS that advertises
+   * HT carries HT Capabilities (and WMM where the BSS has it), so the AP may
+   * use HT rates; every Block Ack request is declined (build_addba_decline).
+   * Takes effect at the next association request. */
+  void set_ht(bool on) { ht_ = on; }
+  bool ht() const { return ht_; }
 
  private:
   /* WHAT AN UNPROTECTED EAPOL-KEY FRAME MAY BE. The clear carries the
@@ -648,7 +683,8 @@ class StationSm {
     std::vector<uint8_t> m =
         build_assoc_req(own_, bssid_, ssid_,
                         /*rsn=*/security_ == Security::Wpa2Psk,
-                        /*five_ghz=*/channel_ > 14);
+                        /*five_ghz=*/channel_ > 14, /*listen_interval=*/10,
+                        /*ht=*/ht_ && bss_ht_, /*wmm=*/ht_ && bss_wmm_);
     /* build_assoc_req returns an empty vector for an SSID it cannot encode.
      * Sending a truncated association request would be worse than failing. */
     if (m.empty()) { fail(Failure::AssocRefused, 0); return; }
@@ -803,6 +839,9 @@ class StationSm {
   uint8_t pmk_[32] = {0};
   bool have_pmk_ = false;
   uint8_t channel_ = 0;
+  bool ht_ = false;
+  bool bss_ht_ = false;
+  bool bss_wmm_ = false;
   uint16_t aid_ = 0;
   bool authenticated_ = false;   /* the AP accepted our authentication */
   uint16_t status_ = 0;

@@ -87,6 +87,7 @@ public:
   bool SetStationIdentity(const devourer::MacAddr &own,
                           const devourer::MacAddr &bssid) override;
   bool ClearStationIdentity() override;
+  bool SetResponseRates(uint32_t mask, uint32_t *previous) override;
   /* A-MPDU TX mode (IRadio contract; src/AmpduMode.h). Programs the
    * 8822B pacing regs (0x455 max-time, 0x4BC burst-mode) under _reg_mu and
    * records the descriptor state the TX path reads. */

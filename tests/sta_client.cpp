@@ -78,9 +78,18 @@
 
 #include <csignal>
 #include <fcntl.h>
+#if defined(__linux__)
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <net/if_arp.h>
+#elif defined(__APPLE__)
+#include <net/bpf.h>
+#include <net/if.h>
+#include <net/ndrv.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char** environ;
+#endif
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -94,6 +103,7 @@
 #include "SelectedChannel.h"
 #include "TxMode.h"
 #include "UsbOpen.h"
+#include "IRtlRadio.h"
 #include "WiFiDriver.h"
 #include "env_config.h"
 #include "logger.h"
@@ -137,6 +147,7 @@ bool g_arm = true;
 IRadio* g_dev = nullptr;
 std::vector<uint8_t> g_rt;      /* NOACK radiotap: group-addressed frames */
 std::vector<uint8_t> g_rt_ack;  /* ACK-requested: unicast, unless empty */
+std::vector<uint8_t> g_rt_ack_fast; /* ACK-requested at DEVOURER_TX_RATE: host data */
 std::mutex g_q_mu;
 std::vector<std::vector<uint8_t>> g_q;
 std::atomic<uint64_t> g_sent{0}, g_send_fail{0}, g_q_drop{0};
@@ -220,6 +231,25 @@ std::atomic<uint64_t> g_ptk_installs{0}, g_gtk_installs{0};
 std::atomic<uint64_t> g_no_key{0};
 
 int g_tap_fd = -1;
+/* The host side's READ end where it differs from g_tap_fd (the write end
+ * tap_up uses): on macOS frames go up through an NDRV socket and come down
+ * through BPF, which delivers a buffer of bpf_hdr-framed packets per read.
+ * -1 on Linux, where the TAP fd does both. */
+int g_tap_rfd = -1;
+bool g_rrsr_set = false;   /* DEVOURER_STA_ACK_RATES applied */
+/* DEVOURER_STA_HT: 802.11n association (StationSm::set_ht), and with it
+ * A-MSDU delivery, which an HT station must accept (802.11-2016 10.12). Off,
+ * A-MSDUs stay refused. */
+bool g_ht = false;
+std::atomic<uint64_t> g_amsdu_rx{0}, g_amsdu_sub{0};
+/* Data frames addressed to us, by the PHY they arrived on, for the link
+ * line. RxAtrib data_rate is the Realtek DESC_RATE code on the 11ac parts
+ * (hal_com.h): 0x00-0x0b legacy, 0x0c + MCS for HT MCS 0-31, VHT above.
+ * Kestrel's 9-bit AX code is not decoded here. */
+std::atomic<uint64_t> g_rx_rate_ht{0}, g_rx_rate_legacy{0};
+std::atomic<int> g_rx_mcs_max{-1};
+uint32_t g_rrsr_old = 0;   /* ...and the bits it replaced */
+size_t g_tap_rbuf = 2048; /* read size the reader must use (BIOCGBLEN) */
 
 /* A CLEAN STOP: the on-air harness ends a run by signalling this process,
  * and the ledger printed on the way out is the run's diagnostic. Written by
@@ -256,10 +286,16 @@ uint32_t now_ms() {
       .count();
 }
 
-void enqueue(std::vector<uint8_t> mpdu) {
+/* `host_data`: a data MSDU the host handed us, which may ride the fast rate.
+ * Everything the station originates itself - authentication, association,
+ * the four-way, a rekey answer - stays at the base rate: losing those costs
+ * a join, not a retransmitted TCP segment. */
+void enqueue(std::vector<uint8_t> mpdu, bool host_data = false) {
   /* addr1's I/G bit: a group address is never ACKed. */
   const bool unicast = mpdu.size() >= 10 && (mpdu[4] & 0x01) == 0;
-  const std::vector<uint8_t>& rt = (unicast && !g_rt_ack.empty()) ? g_rt_ack : g_rt;
+  const std::vector<uint8_t>& ack =
+      (host_data && !g_rt_ack_fast.empty()) ? g_rt_ack_fast : g_rt_ack;
+  const std::vector<uint8_t>& rt = (unicast && !ack.empty()) ? ack : g_rt;
   std::vector<uint8_t> f;
   f.reserve(rt.size() + mpdu.size());
   f.insert(f.end(), rt.begin(), rt.end());
@@ -349,6 +385,40 @@ bool tap_up(const uint8_t* da, const uint8_t* sa, const uint8_t* msdu,
   return false;
 }
 
+/* One A-MSDU's subframes to the host (802.11-2016 9.3.2.2.2): DA, SA, a
+ * big-endian length, the MSDU, padding to 4 bytes after all but the last.
+ * Returns false for a malformed one; subframes before the fault have already
+ * gone up. Caller holds g_mu.
+ *
+ * THE A-MSDU BIT IS NOT AUTHENTICATED (CCMP masks it out of the AAD unless
+ * SPP is negotiated), so a forger can flip it on a genuine MSDU and have its
+ * payload parsed as subframes (FragAttacks, CVE-2020-24588). A genuine MSDU
+ * starts with an LLC/SNAP header, so a first "DA" that reads aa:aa:03:00:00:00
+ * is that attack - dropped, as Linux does. EAPOL never rides an A-MSDU: a
+ * subframe carrying one is dropped, never handed up or to the supplicant. */
+bool tap_up_amsdu(const uint8_t* p, size_t len) {
+  static const uint8_t kSnap[6] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00};
+  if (len >= 6 && std::memcmp(p, kSnap, 6) == 0) return false;
+  g_amsdu_rx.fetch_add(1);
+  size_t off = 0;
+  while (off + 14 <= len) {
+    const uint8_t* da = p + off;
+    const uint8_t* sa = p + off + 6;
+    const size_t l = ((size_t)p[off + 12] << 8) | p[off + 13];
+    if (off + 14 + l > len) return false;
+    const uint8_t* msdu = p + off + 14;
+    const bool eapol = l >= 8 && std::memcmp(msdu, kSnap, 6) == 0 &&
+                       msdu[6] == 0x88 && msdu[7] == 0x8e;
+    if (!eapol) {
+      tap_up(da, sa, msdu, l);
+      g_amsdu_sub.fetch_add(1);
+    }
+    off += 14 + l;
+    if (off < len) off += (4 - (14 + l) % 4) % 4;
+  }
+  return off == len;
+}
+
 /* THE RECEIVE DECISION, with no Packet and no radio in it, so every branch is
  * reachable from `sta_client --self-test`. `mpdu`/`len` is the MPDU without
  * its FCS (mpdu_len()). */
@@ -370,8 +440,22 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     const bool usable = rx_chan != 0 ||
                         (devourer::sta::parse_beacon(mpdu, len, &ds) &&
                          ds.channel != 0);
-    if (usable && g_bss.observe(mpdu, len, rssi, rx_chan, now))
-      g_beacons.fetch_add(1);
+    const BssEntry* seen =
+        usable ? g_bss.observe(mpdu, len, rssi, rx_chan, now) : nullptr;
+    if (seen) g_beacons.fetch_add(1);
+    /* DEVOURER_STA_SCAN_LOG: one line per BSS every 30 frames, for a survey. */
+    static const bool scan_log = std::getenv("DEVOURER_STA_SCAN_LOG") != nullptr;
+    if (seen && scan_log && (seen->frames == 1 || seen->frames % 30 == 0)) {
+      const uint8_t* b = seen->info.bssid;
+      std::fprintf(stderr,
+                   "  scan: %02x:%02x:%02x:%02x:%02x:%02x ch%-3u rssi %4d dBm "
+                   "frames %-5u '%s'%s%s%s\n",
+                   b[0], b[1], b[2], b[3], b[4], b[5], seen->info.channel,
+                   seen->rssi, seen->frames, seen->info.ssid.c_str(),
+                   seen->info.privacy ? " (protected)" : "",
+                   seen->info.has_ht ? " ht" : "",
+                   seen->info.has_wmm ? " wmm" : "");
+    }
   }
 
   const StationSm::State before = g_sm.state();
@@ -404,7 +488,8 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
   }
   const size_t hlen = devourer::sta::data_hdr_len(fc0, fc1);
   if (len < hlen) { g_rx_short.fetch_add(1); return; }
-  if (devourer::sta::is_qos_data(fc0) && (mpdu[24] & 0x80)) {
+  const bool amsdu = devourer::sta::is_qos_data(fc0) && (mpdu[24] & 0x80);
+  if (amsdu && !g_ht) {
     g_amsdu_drop.fetch_add(1);
     return;
   }
@@ -432,7 +517,13 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
      * StationSm::on_rx's, and it has already had it. */
     if (g_sm.security() != StationSm::Security::Open) return;
     g_plain_rx.fetch_add(1);
-    if (len > hlen) tap_up(da, sa, mpdu + hlen, len - hlen);
+    if (len > hlen) {
+      if (amsdu) {
+        if (!tap_up_amsdu(mpdu + hlen, len - hlen)) g_amsdu_drop.fetch_add(1);
+      } else {
+        tap_up(da, sa, mpdu + hlen, len - hlen);
+      }
+    }
     return;
   }
   if (g_sm.security() == StationSm::Security::Open) return;
@@ -482,6 +573,10 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     return;
   }
   if (!pairwise) g_group_rx.fetch_add(1);
+  if (amsdu) {
+    if (!tap_up_amsdu(plain.data(), plain_len)) g_amsdu_drop.fetch_add(1);
+    return;
+  }
 
   /* AN EAPOL-KEY FRAME INSIDE THE CIPHER IS A REKEY, and it is the state
    * machine's, not the host's. One not addressed to us, or not under the
@@ -545,7 +640,7 @@ bool air_msdu(const uint8_t* msdu, size_t len, const uint8_t da[6],
   if (!protect) {
     hdr.insert(hdr.end(), msdu, msdu + len);
     if (from_host) g_tx_plain.fetch_add(1);
-    enqueue(std::move(hdr));
+    enqueue(std::move(hdr), from_host);
     return true;
   }
   /* 0 means the length would overflow: refused like any cipher failure. */
@@ -561,7 +656,7 @@ bool air_msdu(const uint8_t* msdu, size_t len, const uint8_t da[6],
   g_tx_pn++;
   f.resize(n);
   if (from_host) g_tx_enc.fetch_add(1);
-  enqueue(std::move(f));
+  enqueue(std::move(f), from_host);
   return true;
 }
 
@@ -674,6 +769,123 @@ uint8_t supervise(uint32_t now) {
 
 /* ---- TAP ---------------------------------------------------------------- */
 
+#if defined(__APPLE__)
+/* macOS has no TAP. A fake-Ethernet pair stands in for one: the host stack
+ * owns `name` (feth<N>), and this process owns its peer feth<N+5000> - BPF on
+ * the peer reads what the host sends, an NDRV socket bound to the peer writes
+ * what the host receives. The pair is created here and destroyed by
+ * tap_close(); a pair left by a killed run is destroyed first. Needs root. */
+std::string g_feth_host, g_feth_peer;
+
+int run_ifconfig(std::vector<std::string> args, bool quiet = false) {
+  args.insert(args.begin(), "/sbin/ifconfig");
+  std::vector<char*> argv;
+  for (auto& a : args) argv.push_back(a.data());
+  argv.push_back(nullptr);
+  pid_t pid = 0;
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  if (quiet) posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  const int rc = posix_spawn(&pid, argv[0], &fa, nullptr, argv.data(), environ);
+  posix_spawn_file_actions_destroy(&fa);
+  if (rc != 0) return -1;
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+void tap_close() {
+  if (g_tap_rfd >= 0) { ::close(g_tap_rfd); g_tap_rfd = -1; }
+  if (!g_feth_host.empty()) run_ifconfig({g_feth_host, "destroy"}, true);
+  if (!g_feth_peer.empty()) run_ifconfig({g_feth_peer, "destroy"}, true);
+  g_feth_host.clear();
+  g_feth_peer.clear();
+}
+
+int tap_open(const char* name, const uint8_t mac[6]) {
+  unsigned unit = 0;
+  if (std::sscanf(name, "feth%u", &unit) != 1 || unit >= 5000) {
+    std::fprintf(stderr, "  TAP: on macOS the name must be feth0..feth4999 "
+                         "(got '%s')\n", name);
+    return -1;
+  }
+  g_feth_host = name;
+  g_feth_peer = "feth" + std::to_string(unit + 5000);
+  run_ifconfig({g_feth_host, "destroy"}, true);
+  run_ifconfig({g_feth_peer, "destroy"}, true);
+
+  char macs[18];
+  std::snprintf(macs, sizeof macs, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0],
+                mac[1], mac[2], mac[3], mac[4], mac[5]);
+  if (run_ifconfig({g_feth_peer, "create"}) != 0 ||
+      run_ifconfig({g_feth_host, "create"}) != 0 ||
+      run_ifconfig({g_feth_host, "lladdr", macs}) != 0 ||
+      run_ifconfig({g_feth_host, "peer", g_feth_peer}) != 0 ||
+      run_ifconfig({g_feth_peer, "mtu", "1500", "up"}) != 0 ||
+      run_ifconfig({g_feth_host, "mtu", "1500", "up"}) != 0) {
+    std::fprintf(stderr, "  TAP: could not create %s/%s (root?)\n",
+                 g_feth_host.c_str(), g_feth_peer.c_str());
+    tap_close();
+    return -1;
+  }
+
+  int bpf = -1;
+  for (int i = 0; i < 256 && bpf < 0; ++i) {
+    const std::string dev = "/dev/bpf" + std::to_string(i);
+    bpf = ::open(dev.c_str(), O_RDWR | O_NONBLOCK);
+  }
+  if (bpf < 0) { perror("  TAP: no free /dev/bpf"); tap_close(); return -1; }
+  u_int blen = 1u << 17, one = 1, zero = 0;
+  struct ifreq ifr;
+  std::memset(&ifr, 0, sizeof ifr);
+  std::snprintf(ifr.ifr_name, IFNAMSIZ, "%s", g_feth_peer.c_str());
+  /* BIOCSBLEN before BIOCSETIF; SEESENT off so the frames this process
+   * injects on the peer are not read straight back as host traffic. */
+  if (::ioctl(bpf, BIOCSBLEN, &blen) < 0 || ::ioctl(bpf, BIOCSETIF, &ifr) < 0 ||
+      ::ioctl(bpf, BIOCIMMEDIATE, &one) < 0 ||
+      ::ioctl(bpf, BIOCSSEESENT, &zero) < 0 ||
+      ::ioctl(bpf, BIOCSHDRCMPLT, &one) < 0 ||
+      ::ioctl(bpf, BIOCPROMISC, &one) < 0 || ::ioctl(bpf, BIOCGBLEN, &blen) < 0) {
+    perror("  TAP: BPF setup");
+    ::close(bpf);
+    tap_close();
+    return -1;
+  }
+  g_tap_rfd = bpf;
+  g_tap_rbuf = blen;
+
+  const int nd = ::socket(AF_NDRV, SOCK_RAW, 0);
+  struct sockaddr_ndrv sa;
+  std::memset(&sa, 0, sizeof sa);
+  sa.snd_len = sizeof sa;
+  sa.snd_family = AF_NDRV;
+  std::snprintf((char*)sa.snd_name, sizeof sa.snd_name, "%s",
+                g_feth_peer.c_str());
+  if (nd < 0 || ::bind(nd, (struct sockaddr*)&sa, sizeof sa) < 0 ||
+      ::connect(nd, (struct sockaddr*)&sa, sizeof sa) < 0) {
+    perror("  TAP: NDRV socket");
+    if (nd >= 0) ::close(nd);
+    tap_close();
+    return -1;
+  }
+  /* NON-BLOCKING for the same reason as the Linux TAP: tap_up writes from
+   * the RX callback under g_mu. */
+  ::fcntl(nd, F_SETFL, ::fcntl(nd, F_GETFL) | O_NONBLOCK);
+  std::fprintf(stderr,
+               "  TAP: %s (peer %s) up with %s - the host stack owns "
+               "ARP/ICMP/DHCP\n",
+               g_feth_host.c_str(), g_feth_peer.c_str(), macs);
+  return nd;
+}
+#elif !defined(__linux__)
+int tap_open(const char* name, const uint8_t mac[6]) {
+  (void)mac;
+  std::fprintf(stderr, "  TAP: %s not available on this platform\n", name);
+  return -1;
+}
+void tap_close() {}
+#else
+void tap_close() {}
 int tap_open(const char* name, const uint8_t mac[6]) {
   /* NON-BLOCKING: tap_up() writes from the RX callback under g_mu, and the
    * teardown waits for the RX loop - a blocked write would stall both. */
@@ -707,6 +919,7 @@ int tap_open(const char* name, const uint8_t mac[6]) {
                ifr.ifr_name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return fd;
 }
+#endif
 
 /* ---- the radio adapter --------------------------------------------------- */
 
@@ -724,6 +937,17 @@ void on_rx(const Packet& p) {
   const size_t mlen = mpdu_len(p.Data.size(), p.RxAtrib.fcs_present);
   if (p.RxAtrib.crc_err) { g_crc_err.fetch_add(1); return; }
   if (mlen < 24) { g_rx_short.fetch_add(1); return; }
+  if ((p.Data[0] & 0x0c) == 0x08 && std::memcmp(p.Data.data() + 4, g_own, 6) == 0) {
+    const uint16_t r = p.RxAtrib.data_rate;
+    if (r >= 0x0c && r <= 0x2b) {
+      g_rx_rate_ht.fetch_add(1);
+      const int mcs = r - 0x0c;
+      int cur = g_rx_mcs_max.load();
+      while (mcs > cur && !g_rx_mcs_max.compare_exchange_weak(cur, mcs)) {}
+    } else if (r <= 0x0b) {
+      g_rx_rate_legacy.fetch_add(1);
+    }
+  }
   /* An exception must not unwind into the backend's RX thread (that is
    * std::terminate: no leave, no clear, no ledger). Stop the run instead. */
   try {
@@ -824,6 +1048,11 @@ void report() {
                (unsigned long long)g_replays.load(),
                (unsigned long long)g_dup_drop.load(),
                (unsigned long long)g_no_key.load());
+  std::fprintf(stderr,
+               "  ht: %s, addba declined=%u, A-MSDU rx=%llu (subframes %llu)\n",
+               g_ht ? "on" : "off", g_sm.addba_declined,
+               (unsigned long long)g_amsdu_rx.load(),
+               (unsigned long long)g_amsdu_sub.load());
   std::fprintf(stderr,
                "  refused before the host: fragmented=%llu, A-MSDU=%llu,"
                " short=%llu, crc_err=%llu\n",
@@ -981,6 +1210,8 @@ int main(int argc, char** argv) {
                  kBackoffMinMs, kBackoffMaxMs);
     return 2;
   }
+  if (const char* h = std::getenv("DEVOURER_STA_HT"))
+    g_ht = *h && std::strcmp(h, "0") != 0;
   if (const char* a = std::getenv("DEVOURER_STA_ARM"))
     g_arm = std::strcmp(a, "0") != 0;
 
@@ -1035,12 +1266,22 @@ int main(int argc, char** argv) {
    * frames stay NOACK - nobody acknowledges them. */
   const char* rate_s = std::getenv("DEVOURER_TX_RATE");
   if (!rate_s || !*rate_s) rate_s = "6M";
-  g_rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str(rate_s));
-  if (const char* a = std::getenv("DEVOURER_STA_ACK"); !a || !*a || std::strcmp(a, "0") != 0)
-    g_rt_ack = devourer::build_stream_radiotap(devourer::parse_tx_mode_str(rate_s),
+  /* DEVOURER_STA_BASE_RATE: when set, DEVOURER_TX_RATE carries only the
+   * host's unicast data and this rate carries the rest - group frames (no
+   * retry, no firmware fallback) and the station's own management and EAPOL.
+   * Measured: at -70 dBm a 54M join failed 23 times in 45 s while 6M joined
+   * at the first attempt. Unset, everything rides DEVOURER_TX_RATE. */
+  const char* base_s = std::getenv("DEVOURER_STA_BASE_RATE");
+  if (!base_s || !*base_s) base_s = rate_s;
+  g_rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str(base_s));
+  if (const char* a = std::getenv("DEVOURER_STA_ACK"); !a || !*a || std::strcmp(a, "0") != 0) {
+    g_rt_ack = devourer::build_stream_radiotap(devourer::parse_tx_mode_str(base_s),
                                                /*no_ack=*/false);
-  std::fprintf(stderr, "  TX rate: %s, unicast %s, tx.retry_limit %d (%s)\n",
-               rate_s,
+    g_rt_ack_fast = devourer::build_stream_radiotap(
+        devourer::parse_tx_mode_str(rate_s), /*no_ack=*/false);
+  }
+  std::fprintf(stderr, "  TX rate: host data %s, base %s, unicast %s, tx.retry_limit %d (%s)\n",
+               rate_s, base_s,
                g_rt_ack.empty() ? "NOACK (no retries)"
                                 : "ACK-requested (hardware retries)",
                cfg.tx.retry_limit,
@@ -1078,6 +1319,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "sta_client: configure failed\n");
       return 1;
     }
+    g_sm.set_ht(g_ht);
   }
 
   /* A TAP that was asked for and could not be opened is a refusal, not a
@@ -1116,8 +1358,10 @@ int main(int argc, char** argv) {
   std::thread tap_rd;
   if (g_tap_fd >= 0) try {
     tap_rd = std::thread([&] {
-      uint8_t eth[2048];
-      const int fd = g_tap_fd;
+      const bool bpf = g_tap_rfd >= 0;
+      std::vector<uint8_t> rbuf(bpf ? g_tap_rbuf : 2048);
+      uint8_t* const eth = rbuf.data();
+      const int fd = bpf ? g_tap_rfd : g_tap_fd;
       for (;;) {
         /* A poll with a timeout and a stop flag: a close() from another
          * thread does not wake a read() already blocked on the fd. */
@@ -1134,7 +1378,7 @@ int main(int argc, char** argv) {
           fault("TAP poll", std::strerror(r < 0 ? errno : EIO));
           return;
         }
-        const ssize_t got = ::read(fd, eth, sizeof eth);
+        const ssize_t got = ::read(fd, eth, rbuf.size());
         /* The fd is non-blocking: poll() said readable, but a frame can
          * still be gone - nothing to read, wait again. */
         if (got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
@@ -1147,6 +1391,18 @@ int main(int argc, char** argv) {
         }
         /* Guarded like on_rx: a throw here is std::terminate otherwise. */
         try {
+#if defined(__APPLE__)
+          if (bpf) {
+            /* One read, many packets, each behind a bpf_hdr and padded to
+             * BPF_WORDALIGN. */
+            for (ssize_t off = 0; off + (ssize_t)sizeof(bpf_hdr) <= got;) {
+              const bpf_hdr* h = (const bpf_hdr*)(eth + off);
+              if (off + h->bh_hdrlen + (ssize_t)h->bh_caplen > got) break;
+              tap_down_one(eth + off + h->bh_hdrlen, h->bh_caplen);
+              off += BPF_WORDALIGN(h->bh_hdrlen + h->bh_caplen);
+            }
+          } else
+#endif
           tap_down_one(eth, (size_t)got);
         } catch (const std::exception& e) {
           fault("TAP path", e.what());
@@ -1225,6 +1481,64 @@ int main(int argc, char** argv) {
         enqueue(std::move(f));
       }
     }
+    /* One line per state change, so a supervising script can wait for
+     * Connected without parsing the ledger. */
+    {
+      static StationSm::State shown = StationSm::State::Idle;
+      StationSm::State st;
+      StationSm::Failure why;
+      uint16_t status;
+      {
+        std::lock_guard<std::mutex> l(g_mu);
+        st = g_sm.state();
+        why = g_sm.fail_reason();
+        status = g_sm.status();
+      }
+      if (st != shown) {
+        shown = st;
+        const uint32_t t = now_ms();
+        if (st == StationSm::State::Failed)
+          std::fprintf(stderr,
+                       "  station state: %s reason=%s status=%u t=%u.%03u\n",
+                       state_name(st), fail_name(why), status, t / 1000,
+                       t % 1000);
+        else
+          std::fprintf(stderr, "  station state: %s t=%u.%03u\n",
+                       state_name(st), t / 1000, t % 1000);
+      }
+      /* DEVOURER_STA_LINK_LOG: every 2 s the receiver's gain (IGI) and
+       * false-alarm count beside the AP's RSSI and the data counters, to
+       * tell a deaf receiver from a lost uplink when the link drops. */
+      static const bool link_log = std::getenv("DEVOURER_STA_LINK_LOG") != nullptr;
+      static uint32_t next_link_ms = 0;
+      static uint64_t last_rx = 0, last_dup = 0, last_tx = 0;
+      if (link_log && (int32_t)(now - next_link_ms) >= 0) {
+        next_link_ms = now + 2000;
+        int ap_rssi = -128;
+        {
+          std::lock_guard<std::mutex> l(g_mu);
+          if (const BssEntry* e = g_bss.find(g_sm.bssid())) ap_rssi = e->rssi;
+        }
+        RxEnergy en;
+        if (auto* rtl = dynamic_cast<IRtlRadio*>(g_dev)) en = rtl->GetRxEnergy(false);
+        const uint64_t rx = g_enc_rx.load(), dup = g_dup_drop.load(),
+                       tx = g_q_in.load();
+        std::fprintf(stderr,
+                     "  link: t=%u igi=0x%02x fa=%u ap_rssi=%d rx=+%llu "
+                     "dup=+%llu tx=+%llu ht=+%llu legacy=+%llu mcs_max=%d\n",
+                     now / 1000, en.valid_igi ? en.igi : 0,
+                     en.valid_fa ? en.fa_ofdm + en.fa_cck : 0, ap_rssi,
+                     (unsigned long long)(rx - last_rx),
+                     (unsigned long long)(dup - last_dup),
+                     (unsigned long long)(tx - last_tx),
+                     (unsigned long long)g_rx_rate_ht.exchange(0),
+                     (unsigned long long)g_rx_rate_legacy.exchange(0),
+                     g_rx_mcs_max.exchange(-1));
+        last_rx = rx;
+        last_dup = dup;
+        last_tx = tx;
+      }
+    }
     if (join_now)
       std::fprintf(stderr,
                    "  station joining BSSID %02x:%02x:%02x:%02x:%02x:%02x\n",
@@ -1248,6 +1562,23 @@ int main(int argc, char** argv) {
                    arm_ok ? "armed" : "REFUSED", bssid_armed[0],
                    bssid_armed[1], bssid_armed[2], bssid_armed[3],
                    bssid_armed[4], bssid_armed[5], arm_tries, kArmTries);
+      /* DEVOURER_STA_ACK_RATES: the rates the MAC may answer with (RRSR
+       * bits, IRtlRadio::SetResponseRates). Once, with the first arm; the old
+       * bits are put back at exit. */
+      if (arm_ok && !g_rrsr_set) {
+        if (const char* r = std::getenv("DEVOURER_STA_ACK_RATES"); r && *r) {
+          auto* rtl = dynamic_cast<IRtlRadio*>(g_dev);
+          const uint32_t mask = (uint32_t)std::strtoul(r, nullptr, 0);
+          if (rtl && rtl->SetResponseRates(mask, &g_rrsr_old)) {
+            g_rrsr_set = true;
+            std::fprintf(stderr, "  response rates 0x%05x (was 0x%05x)\n",
+                         mask, g_rrsr_old);
+          } else {
+            std::fprintf(stderr, "  response rates NOT set (not ported or "
+                                 "read back different)\n");
+          }
+        }
+      }
     }
     send_batch();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1297,6 +1628,7 @@ int main(int argc, char** argv) {
   {
     std::lock_guard<std::mutex> l(g_mu);
     if (g_tap_fd >= 0) { ::close(g_tap_fd); g_tap_fd = -1; }
+    tap_close();
   }
   try {
     send_batch();
@@ -1322,6 +1654,11 @@ int main(int argc, char** argv) {
       fault("ClearStationIdentity", "unknown exception");
     }
     std::fprintf(stderr, "  station identity clear: %s\n", r);
+  }
+  if (g_rrsr_set) try {
+    if (auto* rtl = dynamic_cast<IRtlRadio*>(g_dev))
+      rtl->SetResponseRates(g_rrsr_old, nullptr);
+  } catch (...) {
   }
 
   report();

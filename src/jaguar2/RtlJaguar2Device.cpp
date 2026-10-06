@@ -454,6 +454,20 @@ bool RtlJaguar2Device::ClearStationIdentity() {
   return _station.clear(_device, _logger, "Jaguar2");
 }
 
+bool RtlJaguar2Device::SetResponseRates(uint32_t mask, uint32_t *previous) {
+  constexpr uint16_t kRegRrsr = 0x0440;
+  constexpr uint32_t kRateBits = 0x000fffffu;
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  const uint32_t old = _device.rtw_read32(kRegRrsr);
+  const uint32_t want = (old & ~kRateBits) | (mask & kRateBits);
+  _device.rtw_write32(kRegRrsr, want);
+  const uint32_t got = _device.rtw_read32(kRegRrsr);
+  if (previous) *previous = old & kRateBits;
+  _logger->info("Jaguar2: RRSR rates 0x{:05x} -> 0x{:05x}", old & kRateBits,
+                got & kRateBits);
+  return (got & kRateBits) == (mask & kRateBits);
+}
+
 void RtlJaguar2Device::ClearAckResponder() {
   std::lock_guard<std::mutex> lk(_reg_mu);
   /* The gate this closes is the station's too: a clear here would leave the

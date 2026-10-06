@@ -958,6 +958,184 @@ void test_beacon_loss() {
   check(!sm.keyed(), "...and keyed() stops claiming a link that is gone");
 }
 
+/* An HT AP's beacon: the fixture's, plus HT Capabilities and the WMM
+ * Parameter element, after an unrelated vendor element so the parser has to
+ * walk past the first one. */
+std::vector<uint8_t> ht_beacon(uint8_t chan) {
+  std::vector<uint8_t> b = beacon(kBssid, chan);
+  const uint8_t ht[26] = {0x6f, 0x00};
+  devourer::sta::append_ie(b, devourer::sta::kEidHtCaps, ht, sizeof ht);
+  const uint8_t other[4] = {0x00, 0x10, 0x18, 0x02};
+  devourer::sta::append_ie(b, devourer::sta::kEidVendor, other, sizeof other);
+  const uint8_t wmm[8] = {0x00, 0x50, 0xf2, 0x02, 0x01, 0x01, 0x80, 0x00};
+  devourer::sta::append_ie(b, devourer::sta::kEidVendor, wmm, sizeof wmm);
+  return b;
+}
+
+/* The element `eid` in an association request's IEs, or null. Vendor
+ * elements are matched on the WMM OUI and type. */
+const uint8_t* assoc_ie(const std::vector<uint8_t>& f, uint8_t eid,
+                        uint8_t* len) {
+  const size_t fixed = 24 + 4; /* header, capability, listen interval */
+  for (size_t i = fixed; i + 2 <= f.size();) {
+    const uint8_t id = f[i], l = f[i + 1];
+    if (i + 2 + l > f.size()) return nullptr;
+    const uint8_t* v = f.data() + i + 2;
+    if (id == eid && (eid != devourer::sta::kEidVendor ||
+                      (l >= 4 && v[0] == 0x00 && v[1] == 0x50 &&
+                       v[2] == 0xf2 && v[3] == 0x02))) {
+      *len = l;
+      return v;
+    }
+    i += 2 + l;
+  }
+  return nullptr;
+}
+
+/* The association request a station sends to `bcn`'s BSS, HT on or off. */
+std::vector<uint8_t> assoc_request_for(const std::vector<uint8_t>& bcn,
+                                       bool ht) {
+  OpenSslCryptoOps crypto;
+  BssTable table;
+  StationSm sm;
+  FixtureAp ap;
+  uint8_t snonce[32];
+  std::vector<uint8_t> f;
+
+  std::memset(snonce, 0x7a, 32);
+  sm.configure(crypto, kSsid, kPsk, kOwn);
+  sm.set_ht(ht);
+  const BssEntry* bss = table.observe(bcn.data(), bcn.size(), -40, 36, 0);
+  if (!bss) return {};
+  sm.join(*bss, snonce, 0);
+  while (sm.pop_tx(&f)) {
+    if (f[0] == devourer::sta::kFcAssocReq) return f;
+    const std::vector<uint8_t> r = ap.respond(f);
+    if (!r.empty()) sm.on_rx(r.data(), r.size(), 0);
+  }
+  return {};
+}
+
+void test_ht_beacon_is_parsed() {
+  devourer::sta::BssInfo info;
+  std::vector<uint8_t> b = ht_beacon(36);
+  check(devourer::sta::parse_beacon(b.data(), b.size(), &info),
+        "ht: the HT beacon parses");
+  check(info.has_ht && info.has_wmm,
+        "ht: ...with HT and WMM found past another vendor element");
+  b = beacon(kBssid, 36);
+  devourer::sta::BssInfo plain;
+  devourer::sta::parse_beacon(b.data(), b.size(), &plain);
+  check(!plain.has_ht && !plain.has_wmm, "ht: a legacy beacon has neither");
+}
+
+void test_ht_association_request() {
+  uint8_t l = 0;
+  std::vector<uint8_t> f = assoc_request_for(ht_beacon(36), true);
+  check(!f.empty(), "ht: an association request is sent");
+  const uint8_t* ht = assoc_ie(f, devourer::sta::kEidHtCaps, &l);
+  check(ht && l == 26, "ht: ...carrying a 26-byte HT Capabilities element");
+  check(ht && (ht[0] & 0x02) == 0, "ht: ...that claims 20 MHz only");
+  check(ht && ht[3] == 0xff && ht[4] == 0xff, "ht: ...and MCS 0-15");
+  check(assoc_ie(f, devourer::sta::kEidVendor, &l) && l == 7,
+        "ht: ...and the 7-byte WMM Information element");
+  check(assoc_ie(f, devourer::sta::kEidRsn, &l) != nullptr,
+        "ht: ...and still its RSN element");
+
+  f = assoc_request_for(ht_beacon(36), false);
+  check(!f.empty() && !assoc_ie(f, devourer::sta::kEidHtCaps, &l) &&
+            !assoc_ie(f, devourer::sta::kEidVendor, &l),
+        "ht off: no HT and no WMM, whatever the AP offers");
+  f = assoc_request_for(beacon(kBssid, 36), true);
+  check(!f.empty() && !assoc_ie(f, devourer::sta::kEidHtCaps, &l),
+        "ht on, legacy AP: no HT element");
+}
+
+void test_addba_is_declined() {
+  OpenSslCryptoOps crypto;
+  BssTable table;
+  StationSm sm;
+  FixtureAp ap;
+  uint8_t snonce[32];
+  std::vector<uint8_t> f;
+
+  std::memset(snonce, 0x7a, 32);
+  sm.configure(crypto, kSsid, kPsk, kOwn);
+  sm.set_ht(true);
+  const BssEntry* bss = discovered(table);
+  if (!bss) { check(false, "beacon"); return; }
+
+  /* An ADDBA Request from the AP: category 3, action 0, token 0x5a, BA
+   * parameters 0x1002 (TID 0, 64 buffers), timeout 0, SSC 0x0010. */
+  std::vector<uint8_t> req =
+      devourer::sta::mgmt_hdr(devourer::sta::kFcAction, kOwn, kBssid, kBssid);
+  const uint8_t body[9] = {3, 0, 0x5a, 0x02, 0x10, 0, 0, 0x10, 0x00};
+  req.insert(req.end(), body, body + sizeof body);
+
+  sm.join(*bss, snonce, 0);
+  sm.on_rx(req.data(), req.size(), 0);
+  check(sm.addba_declined == 0, "addba: not answered before the link is up");
+  pump(sm, ap, 0);
+  check(sm.state() == StationSm::State::Connected, "addba: connected");
+
+  sm.on_rx(req.data(), req.size(), 1);
+  check(sm.addba_declined == 1, "addba: a request on the live link is answered");
+  bool found = false;
+  while (sm.pop_tx(&f)) {
+    if (f[0] != devourer::sta::kFcAction) continue;
+    found = true;
+    check(f.size() == 24 + 9, "addba: the response is 9 bytes of body");
+    check(std::memcmp(f.data() + 4, kBssid, 6) == 0 &&
+              std::memcmp(f.data() + 10, kOwn, 6) == 0,
+          "addba: ...sent to the AP from us");
+    check(f[24] == 3 && f[25] == 1 && f[26] == 0x5a,
+          "addba: ...as an ADDBA Response echoing the dialog token");
+    check(f[27] == 37 && f[28] == 0, "addba: ...with status 37, declined");
+    check(f[29] == 0x02 && f[30] == 0x10, "addba: ...and the parameters echoed");
+  }
+  check(found, "addba: the response is queued");
+
+  std::vector<uint8_t> other = req;
+  other[24] = 8; /* SA Query: not ours to answer without 802.11w */
+  sm.on_rx(other.data(), other.size(), 2);
+  check(sm.addba_declined == 1 && !sm.pop_tx(&f),
+        "addba: another action category is ignored");
+}
+
+/* A TICK MAY CARRY AN OLDER CLOCK THAN THE LAST FRAME. The station client
+ * stamps received frames on its RX thread and ticks on its main thread with a
+ * clock read taken before them; a frame stamped a few ms after the tick's
+ * `now` must count as just heard, not as heard 49 days ago. */
+void test_tick_behind_the_last_frame() {
+  OpenSslCryptoOps crypto;
+  BssTable table;
+  StationSm sm;
+  FixtureAp ap;
+  uint8_t snonce[32];
+
+  std::memset(snonce, 0x7a, 32);
+  sm.configure(crypto, kSsid, kPsk, kOwn);
+  const BssEntry* bss = discovered(table);
+  if (!bss) { check(false, "beacon"); return; }
+  sm.join(*bss, snonce, 0);
+  pump(sm, ap, 0);
+  check(sm.state() == StationSm::State::Connected, "the station connects");
+
+  const uint32_t t = 5000;
+  std::vector<uint8_t> b = beacon(kBssid, 6);
+  sm.on_rx(b.data(), b.size(), t);
+  sm.tick(t - 3);
+  check(sm.state() == StationSm::State::Connected,
+        "a tick 3 ms behind the last beacon is not beacon loss");
+  sm.tick(t + StationSm::kBeaconLossMs - 1);
+  check(sm.state() == StationSm::State::Connected,
+        "...and the window still runs from the beacon");
+  sm.tick(t + StationSm::kBeaconLossMs);
+  check(sm.state() == StationSm::State::Failed &&
+            sm.fail_reason() == StationSm::Failure::BeaconLost,
+        "...and ends where it should");
+}
+
 /* leave() tells the AP rather than letting it time the station out - which on
  * this project's own AP holds an AID and one of seven table slots. */
 void test_leave() {
@@ -2239,6 +2417,10 @@ int main() {
   test_join_clears_the_transmit_queue();
   test_transmit_queue_is_bounded();
   test_beacon_loss();
+  test_tick_behind_the_last_frame();
+  test_ht_beacon_is_parsed();
+  test_ht_association_request();
+  test_addba_is_declined();
   test_leave();
   test_rx_counters();
   test_join_refuses_an_unusable_bss();

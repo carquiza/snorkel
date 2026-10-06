@@ -889,6 +889,69 @@ void test_the_dup_cache_spans_a_rekey_not_an_association() {
  * full TAP must return EAGAIN and be counted as an up-drop. The fixture's
  * pipe is non-blocking at both ends, like the real fd; filled here, a
  * blocking write would hang this cell. */
+/* A-MSDU WITH HT ON: each subframe reaches the host as its own Ethernet
+ * frame, padding skipped; an EAPOL subframe is dropped; and a frame whose
+ * first "DA" is an LLC/SNAP header - the A-MSDU-flip attack - delivers
+ * nothing at all. */
+void test_amsdu_subframes_reach_the_host() {
+  reset_all();
+  g_ht = true;
+  while (!tap_read().empty()) {}
+  const uint8_t da[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
+  const uint8_t sa1[6] = {0x02, 0xaa, 0, 0, 0, 1};
+  const uint8_t sa2[6] = {0x02, 0xaa, 0, 0, 0, 2};
+  auto sub = [&](std::vector<uint8_t>& a, const uint8_t* s_a, uint16_t etype,
+                 const char* body, bool pad) {
+    std::vector<uint8_t> msdu = {0xaa, 0xaa, 0x03, 0, 0, 0,
+                                 (uint8_t)(etype >> 8), (uint8_t)etype};
+    msdu.insert(msdu.end(), body, body + std::strlen(body));
+    a.insert(a.end(), da, da + 6);
+    a.insert(a.end(), s_a, s_a + 6);
+    a.push_back((uint8_t)(msdu.size() >> 8));
+    a.push_back((uint8_t)msdu.size());
+    a.insert(a.end(), msdu.begin(), msdu.end());
+    if (pad) a.insert(a.end(), (4 - (14 + msdu.size()) % 4) % 4, 0);
+  };
+
+  std::vector<uint8_t> a;
+  sub(a, sa1, 0x0800, "abc", true);
+  sub(a, sa2, 0x86dd, "defgh", false);
+  bool ok;
+  { std::lock_guard<std::mutex> l(g_mu); ok = tap_up_amsdu(a.data(), a.size()); }
+  check(ok, "a-msdu: two subframes parse");
+  /* The self-test TAP is a byte pipe: both frames come back in one read,
+   * 17 bytes then 19. */
+  std::vector<uint8_t> got = tap_read();
+  check(got.size() == 17 + 19, "a-msdu: two Ethernet frames, 17 + 19 bytes");
+  if (got.size() == 17 + 19) {
+    const uint8_t* f1 = got.data();
+    const uint8_t* f2 = got.data() + 17;
+    check(std::memcmp(f1, da, 6) == 0 && std::memcmp(f1 + 6, sa1, 6) == 0 &&
+              f1[12] == 0x08 && f1[13] == 0x00 && f1[14] == 'a',
+          "a-msdu: ...the first with its own SA and ethertype");
+    check(std::memcmp(f2 + 6, sa2, 6) == 0 && f2[12] == 0x86 &&
+              f2[13] == 0xdd && f2[18] == 'h',
+          "a-msdu: ...and the second, after the padding");
+  }
+  check(tap_read().empty(), "a-msdu: ...and nothing else");
+
+  a.clear();
+  sub(a, sa1, 0x888e, "eapol", true);
+  sub(a, sa2, 0x0800, "ip", false);
+  { std::lock_guard<std::mutex> l(g_mu); tap_up_amsdu(a.data(), a.size()); }
+  got = tap_read();
+  check(got.size() == 14 + 2 && got[12] == 0x08 && tap_read().empty(),
+        "a-msdu: an EAPOL subframe is dropped, the rest delivered");
+
+  /* A plain MSDU with the A-MSDU bit forged: its LLC/SNAP header lands where
+   * the first subframe's DA would be. */
+  std::vector<uint8_t> flip = {0xaa, 0xaa, 0x03, 0, 0, 0, 0x08, 0x00,
+                               0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17};
+  { std::lock_guard<std::mutex> l(g_mu); ok = tap_up_amsdu(flip.data(), flip.size()); }
+  check(!ok && tap_read().empty(), "a-msdu: the A-MSDU-flip shape is refused whole");
+  g_ht = false;
+}
+
 void test_a_full_tap_is_a_drop_not_a_stall() {
   reset_all();
   uint8_t fill[4096];
@@ -1911,6 +1974,7 @@ int self_test() {
   selftest::test_a_retransmission_is_a_duplicate();
   selftest::test_the_dup_cache_spans_a_rekey_not_an_association();
   selftest::test_a_full_tap_is_a_drop_not_a_stall();
+  selftest::test_amsdu_subframes_reach_the_host();
   selftest::test_a_fault_exits_nonzero();
   selftest::test_duration_and_channel_parse_strictly();
   selftest::test_the_retry_limit_env_is_parsed();

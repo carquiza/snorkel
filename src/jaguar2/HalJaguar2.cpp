@@ -1069,9 +1069,17 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
    * quirk), so on 2.4G we clear them to reproduce the vendor's clean value; on
    * 5G those bits are the real band indicator and must be kept (masking them was
    * what left the 5G synth in 2.4G mode -> dead 5G RX). Net: devourer's RF18 now
-   * matches the vendor's per-band value. */
+   * matches the vendor's per-band value.
+   *
+   * Kept is not enough on 5G: after a 2.4G tune the mask above has already
+   * cleared bits 8/16 in the chip, so a 2.4G -> 5G retune read them back as 0
+   * and left the synth in 2.4G mode (rf18=0x00c30 at ch48, nothing heard).
+   * Set them on 5G rather than trusting the read; a cold start on 5G already
+   * read them as set, so its value is unchanged. */
   if (g2)
     rf18 &= 0x00060cffu;
+  else
+    rf18 |= (1u << 16) | (1u << 8); /* RF18 5G band bits */
 
   /* 5/10 MHz: the RF synth only re-latches its internal channel state on an
    * RF18 VALUE EDGE — a same-value rewrite does nothing, and after the
@@ -2525,8 +2533,9 @@ void HalJaguar2::dig_step() {
     ni = static_cast<uint8_t>(igi >= 2 ? igi - 2 : igi);
   if (ni < 0x1c)
     ni = 0x1c;
-  if (ni > 0x3e)
-    ni = 0x3e;
+  const uint8_t ceiling = _cfg.rx.igi_max.value_or(0x3e);
+  if (ni > ceiling)
+    ni = ceiling < 0x1c ? 0x1c : ceiling;
   if (ni != igi) {
     _device.phy_set_bb_reg(0x0c50, 0x7f, ni);
     _device.phy_set_bb_reg(0x0e50, 0x7f, ni);
