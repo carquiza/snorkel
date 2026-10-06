@@ -98,6 +98,12 @@ void reset_all() {
   g_tx_enc = 0; g_tx_enc_fail = 0; g_tx_plain = 0;
   g_crc_err = 0; g_amsdu_drop = 0; g_frag_drop = 0;
   g_eapol_enc_rx = 0; g_eapol_enc_tx = 0;
+  g_ht = false;
+  g_ba = false;
+  for (int t = 0; t < 8; ++t) {
+    g_reorder[t] = devourer::sta::RxReorder();
+    g_reorder_gen[t] = 0;
+  }
   g_ptk_installs = 0; g_gtk_installs = 0; g_no_key = 0;
   g_ptk_gen_seen = 0; g_gtk_gen_seen = 0;
   g_scan_dwell_ms = 250;
@@ -950,6 +956,63 @@ void test_amsdu_subframes_reach_the_host() {
   { std::lock_guard<std::mutex> l(g_mu); ok = tap_up_amsdu(flip.data(), flip.size()); }
   check(!ok && tap_read().empty(), "a-msdu: the A-MSDU-flip shape is refused whole");
   g_ht = false;
+}
+
+/* BLOCK ACK: inside an agreement, frames the AP sent 0, 1, 2 that arrive
+ * 0, 2, 1 reach the host 0, 1, 2. Without the buffer (the control arm) CCMP's
+ * replay bitmap still accepts all three, but the host gets them 0, 2, 1. */
+void ba_reorder_arm(bool ba, std::vector<uint8_t>* got, uint64_t* replays) {
+  reset_all();
+  g_ht = ba;
+  g_ba = ba;
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.configure(g_crypto, kSsid, kPsk, g_own);
+    g_sm.set_ht(g_ht);
+    g_sm.set_block_ack(g_ba);
+  }
+  Ap ap;
+  associate(ap, /*rsn=*/true);
+  while (!tap_read().empty()) {}
+
+  uint8_t p0[16] = {10}, p1[16] = {11}, p2[16] = {12};
+  const std::vector<uint8_t> f0 = ap.qos_to_sta(p0, sizeof p0, 0, false);
+  const std::vector<uint8_t> f1 = ap.qos_to_sta(p1, sizeof p1, 0, false);
+  const std::vector<uint8_t> f2 = ap.qos_to_sta(p2, sizeof p2, 0, false);
+  const uint16_t ssn = (uint16_t)((f0[22] | (f0[23] << 8)) >> 4);
+
+  std::vector<uint8_t> addba = devourer::sta::mgmt_hdr(
+      devourer::sta::kFcAction, kStaMac, kBssid, kBssid);
+  const uint16_t params = 0x0002 | (0 << 2) | (64 << 6);
+  const uint16_t ssc = (uint16_t)(ssn << 4);
+  const uint8_t body[9] = {3, 0, 7, (uint8_t)params, (uint8_t)(params >> 8),
+                           0, 0, (uint8_t)ssc, (uint8_t)(ssc >> 8)};
+  addba.insert(addba.end(), body, body + sizeof body);
+  rx_frame(addba.data(), addba.size(), -40, 0);
+
+  rx_frame(f0.data(), f0.size(), -40, 1);
+  rx_frame(f2.data(), f2.size(), -40, 2);
+  rx_frame(f1.data(), f1.size(), -40, 3);
+  *got = tap_read();
+  *replays = g_replays.load();
+}
+
+void test_block_ack_reorders_before_ccmp() {
+  std::vector<uint8_t> got;
+  uint64_t replays = 0;
+  ba_reorder_arm(true, &got, &replays);
+  check(g_sm.addba_accepted == 1, "ba: the agreement is accepted");
+  check(got.size() == 3 * 30 && got[14] == 10 && got[44] == 11 &&
+            got[74] == 12,
+        "ba: frames arriving 0, 2, 1 reach the host 0, 1, 2");
+  check(replays == 0, "ba: ...and none is refused as a replay");
+
+  ba_reorder_arm(false, &got, &replays);
+  check(replays == 0 && got.size() == 3 * 30 && got[14] == 10 &&
+            got[44] == 12 && got[74] == 11,
+        "ba control: without the buffer the host gets them 0, 2, 1");
+  g_ht = false;
+  g_ba = false;
 }
 
 void test_a_full_tap_is_a_drop_not_a_stall() {
@@ -1975,6 +2038,7 @@ int self_test() {
   selftest::test_the_dup_cache_spans_a_rekey_not_an_association();
   selftest::test_a_full_tap_is_a_drop_not_a_stall();
   selftest::test_amsdu_subframes_reach_the_host();
+  selftest::test_block_ack_reorders_before_ccmp();
   selftest::test_a_fault_exits_nonzero();
   selftest::test_duration_and_channel_parse_strictly();
   selftest::test_the_retry_limit_env_is_parsed();

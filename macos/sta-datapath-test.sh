@@ -52,7 +52,7 @@ cleanup() {
   rm -f logs/upload.bin
   [ -n "${SUDO_USER:-}" ] && chown "$SUDO_USER" "$CLOG" "$SUM" 2>/dev/null
   say "default route now: $(default_route_if)"
-  grep -E "station state|link:" "$CLOG" > logs/datapath-link.txt
+  grep -E "station state|link:|block ack: TID" "$CLOG" > logs/datapath-link.txt
   [ -n "${SUDO_USER:-}" ] && chown "$SUDO_USER" logs/datapath-link.txt 2>/dev/null
   say "drops: $(grep -c 'station state: Failed' "$CLOG") ($(grep 'station state: Failed' "$CLOG" | sed 's/.*reason=\([a-z-]*\).*/\1/' | sort | uniq -c | tr '\n' ' '))"
   say "rx rates (data to us): $(awk '/link:/{for(i=1;i<=NF;i++){split($i,kv,"=");if(kv[1]=="ht")h+=kv[2];if(kv[1]=="legacy")l+=kv[2];if(kv[1]=="mcs_max"&&kv[2]>m)m=kv[2]}}END{printf "ht %d, legacy %d, highest MCS %d", h, l, m}' logs/datapath-link.txt)"
@@ -84,12 +84,12 @@ PSK="$(security find-generic-password -D 'AirPort network password' \
   -a "$SSID" -w /Library/Keychains/System.keychain 2>/dev/null)"
 if [ -z "$PSK" ]; then say "FAIL: no password read for $SSID"; exit 1; fi
 
-say "-- 1. join $SSID (HT ${HT:-0}, data $TX_RATE, base $BASE_RATE)"
+say "-- 1. join $SSID (HT ${HT:-0}, BA ${BA:-0}, data $TX_RATE, base $BASE_RATE)"
 DEVOURER_STA_PSK="$PSK" DEVOURER_VID="$VID" DEVOURER_PID="$PID" \
 DEVOURER_CHANNEL="$CHANNEL" DEVOURER_STA_SSID="$SSID" \
 DEVOURER_STA_SCAN_CHANNELS="$SCAN_CHANNELS" DEVOURER_TX_RATE="$TX_RATE" \
 DEVOURER_STA_BASE_RATE="$BASE_RATE" DEVOURER_STA_TAP="$IFACE" \
-DEVOURER_STA_HT="${HT:-0}" DEVOURER_STA_ACK_RATES="$ACK_RATES" DEVOURER_IGI_MAX="$IGI_MAX" DEVOURER_LOG_LEVEL=warn DEVOURER_STA_LINK_LOG=1 \
+DEVOURER_STA_HT="${HT:-0}" DEVOURER_STA_BA="${BA:-0}" DEVOURER_STA_ACK_RATES="$ACK_RATES" DEVOURER_IGI_MAX="$IGI_MAX" DEVOURER_LOG_LEVEL=warn DEVOURER_STA_LINK_LOG=1 \
   ./build/sta_client 600 > "$CLOG" 2>&1 &
 CPID=$!
 T0=$SECONDS

@@ -761,6 +761,49 @@ inline std::vector<uint8_t> build_assoc_req(const uint8_t own[6],
   return m;
 }
 
+/* The fields of an ADDBA Request Action body (802.11-2016 9.6.5.2): category
+ * 3, action 0, dialog token, Block Ack Parameter Set (bit 0 A-MSDU, bit 1
+ * immediate policy, bits 2-5 TID, bits 6-15 buffer size), timeout, and the
+ * Starting Sequence Control (fragment in bits 0-3, sequence above). */
+struct AddbaReq {
+  uint8_t token = 0;
+  uint16_t params = 0;
+  uint8_t tid = 0;
+  bool immediate = false;
+  uint16_t buf = 0;
+  uint16_t timeout = 0;
+  uint16_t ssn = 0;
+};
+
+inline bool parse_addba_req(const uint8_t* body, size_t len, AddbaReq* out) {
+  if (!body || !out || len < 9 || body[0] != 3 || body[1] != 0) return false;
+  out->token = body[2];
+  out->params = get_le16(body + 3);
+  out->tid = (uint8_t)((out->params >> 2) & 0x0f);
+  out->immediate = (out->params & 0x0002) != 0;
+  out->buf = (uint16_t)(out->params >> 6);
+  out->timeout = get_le16(body + 5);
+  out->ssn = (uint16_t)(get_le16(body + 7) >> 4);
+  return true;
+}
+
+/* An ADDBA Response that ACCEPTS `req` with a window of `win` frames:
+ * immediate policy, the request's TID, no A-MSDU inside the A-MPDU, and the
+ * request's timeout. */
+inline std::vector<uint8_t> build_addba_accept(const uint8_t own[6],
+                                               const uint8_t bssid[6],
+                                               const AddbaReq& req,
+                                               uint16_t win) {
+  std::vector<uint8_t> m = mgmt_hdr(kFcAction, bssid, own, bssid);
+  m.push_back(3);            /* category: Block Ack */
+  m.push_back(1);            /* action: ADDBA Response */
+  m.push_back(req.token);
+  put_le16(m, 0);            /* status: success */
+  put_le16(m, (uint16_t)(0x0002 | ((req.tid & 0x0f) << 2) | (win << 6)));
+  put_le16(m, req.timeout);
+  return m;
+}
+
 /* An ADDBA Response that declines (status 37, "request declined") the
  * request in `req_body` - the Action frame body: category 3, action 0,
  * dialog token, Block Ack Parameter Set, timeout, starting sequence. Returns

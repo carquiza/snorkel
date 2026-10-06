@@ -194,6 +194,9 @@ class StationSm {
    * Supplicant::start, which explains at length why this library takes it
    * rather than inventing it. */
   bool join(const BssEntry& bss, const uint8_t snonce[32], uint32_t now_ms) {
+    /* Agreements belong to an association; a new join starts with none. */
+    for (BaRx& b : ba_)
+      if (b.active) { b.active = false; b.gen++; }
     if (!configured_) { fail(Failure::NotConfigured, 0); return false; }
     /* The entry must be the network this station is configured for:
      * BssTable::select matches on the SSID, and a hand-picked entry is held to
@@ -381,11 +384,7 @@ class StationSm {
        * Without HT the AP has no reason to ask; anything else is ignored. */
       case kFcAction: {
         if (!to_us || state_ != State::Connected) { rx_ignored++; return; }
-        std::vector<uint8_t> m =
-            build_addba_decline(own_, bssid_, frame + 24, len - 24);
-        if (m.empty()) { rx_ignored++; return; }
-        assign_seq(m, seq_.next());
-        if (queue(std::move(m))) addba_declined++;
+        on_block_ack_action(frame + 24, len - 24);
         return;
       }
       default:
@@ -622,6 +621,24 @@ class StationSm {
   void set_ht(bool on) { ht_ = on; }
   bool ht() const { return ht_; }
 
+  /* Block Ack (receive side). Off, every ADDBA Request is declined. On (it
+   * needs HT to be asked at all), an immediate-policy request for TID 0-7 is
+   * accepted with a window of up to kBaMaxWin, and the agreement is recorded
+   * for the caller, whose reorder buffer (src/sta/Reorder.h) must follow it:
+   * `gen` changes whenever the agreement on that TID starts or ends. The
+   * BlockAck frames themselves are the hardware's. */
+  static constexpr uint16_t kBaMaxWin = 64;
+  struct BaRx {
+    bool active = false;
+    uint16_t ssn = 0;
+    uint16_t win = 0;
+    uint32_t gen = 0;
+  };
+  void set_block_ack(bool on) { ba_on_ = on; }
+  const BaRx& ba_rx(int tid) const { return ba_[tid & 7]; }
+  uint32_t addba_accepted = 0;
+  uint32_t delba_rx = 0;
+
  private:
   /* WHAT AN UNPROTECTED EAPOL-KEY FRAME MAY BE. The clear carries the
    * four-way, which runs before there is a key; once keys exist, the AP
@@ -672,6 +689,43 @@ class StationSm {
     last_tx_ms_ = now_ms;
     tries_++;
     auth_tx++;
+  }
+
+  /* Category 3 (Block Ack) from our AP. A request is accepted or declined
+   * (set_block_ack); a DELBA from the AP as originator ends that TID's
+   * agreement. Everything else is ignored. */
+  void on_block_ack_action(const uint8_t* body, size_t blen) {
+    if (blen < 2 || body[0] != 3) { rx_ignored++; return; }
+    if (body[1] == 2) {             /* DELBA */
+      if (blen < 6) { rx_malformed++; return; }
+      const uint16_t p = get_le16(body + 2);
+      const int tid = (p >> 12) & 0x0f;
+      if ((p & 0x0800) && tid < 8 && ba_[tid].active) {
+        ba_[tid].active = false;
+        ba_[tid].gen++;
+        delba_rx++;
+      }
+      return;
+    }
+    AddbaReq req;
+    if (!parse_addba_req(body, blen, &req)) { rx_ignored++; return; }
+    std::vector<uint8_t> m;
+    if (ba_on_ && ht_ && req.immediate && req.tid < 8) {
+      const uint16_t win =
+          req.buf == 0 || req.buf > kBaMaxWin ? kBaMaxWin : req.buf;
+      m = build_addba_accept(own_, bssid_, req, win);
+      BaRx& b = ba_[req.tid];
+      b.active = true;
+      b.ssn = req.ssn;
+      b.win = win;
+      b.gen++;
+      addba_accepted++;
+    } else {
+      m = build_addba_decline(own_, bssid_, body, blen);
+      addba_declined++;
+    }
+    assign_seq(m, seq_.next());
+    queue(std::move(m));
   }
 
   void send_assoc(uint32_t now_ms) {
@@ -840,6 +894,8 @@ class StationSm {
   bool have_pmk_ = false;
   uint8_t channel_ = 0;
   bool ht_ = false;
+  bool ba_on_ = false;
+  BaRx ba_[8];
   bool bss_ht_ = false;
   bool bss_wmm_ = false;
   uint16_t aid_ = 0;

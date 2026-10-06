@@ -1109,6 +1109,14 @@ target_include_directories(Dot11Selftest PRIVATE
 target_compile_features(Dot11Selftest PRIVATE cxx_std_20)
 add_test(NAME dot11_frames COMMAND Dot11Selftest)
 
+# src/sta/Reorder.h - the Block Ack receive reorder buffer: release order,
+# holes, window slide, BlockAckReq, timeout and the 4096 wrap.
+add_executable(ReorderSelftest tests/reorder_selftest.cpp)
+target_include_directories(ReorderSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(ReorderSelftest PRIVATE cxx_std_20)
+add_test(NAME sta_reorder COMMAND ReorderSelftest)
+
 # src/sta/BssTable.h - the scan result, and which BSS is worth joining. The
 # two cells that matter are select(), which must not offer a BSS this station
 # cannot finish a handshake with, and observe(), which must not invent a BSS

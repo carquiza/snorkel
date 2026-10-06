@@ -13,6 +13,7 @@
  */
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -1100,6 +1101,108 @@ void test_addba_is_declined() {
   sm.on_rx(other.data(), other.size(), 2);
   check(sm.addba_declined == 1 && !sm.pop_tx(&f),
         "addba: another action category is ignored");
+}
+
+/* An ADDBA Request (or DELBA) Action frame from the fixture AP to us. */
+std::vector<uint8_t> ba_action(std::initializer_list<uint8_t> body) {
+  std::vector<uint8_t> f =
+      devourer::sta::mgmt_hdr(devourer::sta::kFcAction, kOwn, kBssid, kBssid);
+  f.insert(f.end(), body);
+  return f;
+}
+
+void test_block_ack_is_accepted_when_on() {
+  OpenSslCryptoOps crypto;
+  BssTable table;
+  StationSm sm;
+  FixtureAp ap;
+  uint8_t snonce[32];
+  std::vector<uint8_t> f;
+
+  std::memset(snonce, 0x7a, 32);
+  sm.configure(crypto, kSsid, kPsk, kOwn);
+  sm.set_ht(true);
+  sm.set_block_ack(true);
+  const BssEntry* bss = discovered(table);
+  if (!bss) { check(false, "beacon"); return; }
+  sm.join(*bss, snonce, 0);
+  pump(sm, ap, 0);
+  check(sm.state() == StationSm::State::Connected, "ba: connected");
+
+  /* TID 5, immediate, buffer 128 (above our 64), timeout 0, SSN 0x123. */
+  const uint16_t params = 0x0002 | (5 << 2) | (128 << 6);
+  const uint16_t ssc = 0x123 << 4;
+  std::vector<uint8_t> req = ba_action({3, 0, 0x21, (uint8_t)params,
+                                        (uint8_t)(params >> 8), 0, 0,
+                                        (uint8_t)ssc, (uint8_t)(ssc >> 8)});
+  const uint32_t gen0 = sm.ba_rx(5).gen;
+  sm.on_rx(req.data(), req.size(), 1);
+  check(sm.addba_accepted == 1 && sm.addba_declined == 0,
+        "ba: the request is accepted");
+  const StationSm::BaRx& b = sm.ba_rx(5);
+  check(b.active && b.ssn == 0x123 && b.win == 64 && b.gen == gen0 + 1,
+        "ba: ...recorded for TID 5 at SSN 0x123, window clamped to 64");
+  bool found = false;
+  while (sm.pop_tx(&f)) {
+    if (f[0] != devourer::sta::kFcAction) continue;
+    found = true;
+    const uint16_t rp = (uint16_t)(f[29] | (f[30] << 8));
+    check(f[24] == 3 && f[25] == 1 && f[26] == 0x21 && f[27] == 0 &&
+              f[28] == 0,
+          "ba: ...answered with status 0 and the dialog token");
+    check((rp & 0x0002) && ((rp >> 2) & 0x0f) == 5 && (rp >> 6) == 64 &&
+              !(rp & 0x0001),
+          "ba: ...immediate, TID 5, window 64, no A-MSDU in the A-MPDU");
+  }
+  check(found, "ba: the response is queued");
+
+  /* Delayed policy is not offered. */
+  const uint16_t delayed = (3 << 2) | (32 << 6);
+  std::vector<uint8_t> dreq = ba_action({3, 0, 0x22, (uint8_t)delayed,
+                                         (uint8_t)(delayed >> 8), 0, 0, 0, 0});
+  sm.on_rx(dreq.data(), dreq.size(), 2);
+  check(sm.addba_declined == 1 && !sm.ba_rx(3).active,
+        "ba: a delayed-policy request is declined");
+  while (sm.pop_tx(&f)) {}
+
+  /* DELBA from the AP as originator (bit 11), TID 5. */
+  const uint16_t dp = 0x0800 | (5 << 12);
+  std::vector<uint8_t> del = ba_action({3, 2, (uint8_t)dp, (uint8_t)(dp >> 8),
+                                        1, 0});
+  sm.on_rx(del.data(), del.size(), 3);
+  check(!sm.ba_rx(5).active && sm.ba_rx(5).gen == gen0 + 2 &&
+            sm.delba_rx == 1,
+        "ba: the AP's DELBA ends the agreement and moves gen");
+
+  sm.on_rx(req.data(), req.size(), 4);
+  check(sm.ba_rx(5).active, "ba: a new request starts it again");
+  const uint32_t gen1 = sm.ba_rx(5).gen;
+  sm.join(*bss, snonce, 5);
+  check(!sm.ba_rx(5).active && sm.ba_rx(5).gen == gen1 + 1,
+        "ba: a new join drops every agreement");
+}
+
+void test_block_ack_off_declines() {
+  OpenSslCryptoOps crypto;
+  BssTable table;
+  StationSm sm;
+  FixtureAp ap;
+  uint8_t snonce[32];
+
+  std::memset(snonce, 0x7a, 32);
+  sm.configure(crypto, kSsid, kPsk, kOwn);
+  sm.set_ht(true);
+  const BssEntry* bss = discovered(table);
+  if (!bss) { check(false, "beacon"); return; }
+  sm.join(*bss, snonce, 0);
+  pump(sm, ap, 0);
+  const uint16_t params = 0x0002 | (0 << 2) | (64 << 6);
+  std::vector<uint8_t> req = ba_action({3, 0, 1, (uint8_t)params,
+                                        (uint8_t)(params >> 8), 0, 0, 0, 0});
+  sm.on_rx(req.data(), req.size(), 1);
+  check(sm.addba_declined == 1 && sm.addba_accepted == 0 &&
+            !sm.ba_rx(0).active,
+        "ba off: the request is declined and nothing is recorded");
 }
 
 /* A TICK MAY CARRY AN OLDER CLOCK THAN THE LAST FRAME. The station client
@@ -2421,6 +2524,8 @@ int main() {
   test_ht_beacon_is_parsed();
   test_ht_association_request();
   test_addba_is_declined();
+  test_block_ack_is_accepted_when_on();
+  test_block_ack_off_declines();
   test_leave();
   test_rx_counters();
   test_join_refuses_an_unusable_bss();

@@ -111,6 +111,7 @@ extern char** environ;
 #include "sta/BssTable.h"
 #include "sta/Ccmp.h"
 #include "sta/Dot11.h"
+#include "sta/Reorder.h"
 #include "sta/StationSm.h"
 #include "usb_select.h"
 
@@ -248,6 +249,14 @@ std::atomic<uint64_t> g_amsdu_rx{0}, g_amsdu_sub{0};
  * Kestrel's 9-bit AX code is not decoded here. */
 std::atomic<uint64_t> g_rx_rate_ht{0}, g_rx_rate_legacy{0};
 std::atomic<int> g_rx_mcs_max{-1};
+/* DEVOURER_STA_BA: accept Block Ack agreements (StationSm::set_block_ack)
+ * and run a reorder buffer per TID that follows them. Guarded by g_mu. */
+bool g_ba = false;
+devourer::sta::RxReorder g_reorder[8];
+uint32_t g_reorder_gen[8] = {};
+/* How long a hole may hold back the frames behind it: mac80211's
+ * HT_RX_REORDER_BUF_TIMEOUT, 100 ms. */
+constexpr uint32_t kReorderHoldMs = 100;
 uint32_t g_rrsr_old = 0;   /* ...and the bits it replaced */
 size_t g_tap_rbuf = 2048; /* read size the reader must use (BIOCGBLEN) */
 
@@ -419,6 +428,48 @@ bool tap_up_amsdu(const uint8_t* p, size_t len) {
   return off == len;
 }
 
+void rx_data(const uint8_t* mpdu, size_t len, uint32_t now);
+
+/* TID `t`'s reorder buffer, first brought in line with the agreement the
+ * state machine holds for it: a new agreement restarts it at its SSN, an
+ * ended one releases what it held. Caller holds g_mu. */
+devourer::sta::RxReorder& reorder_follow(int t, uint32_t now) {
+  const StationSm::BaRx& b = g_sm.ba_rx(t);
+  if (b.gen != g_reorder_gen[t]) {
+    g_reorder_gen[t] = b.gen;
+    if (b.active)
+      g_reorder[t].start(b.ssn, b.win);
+    else
+      g_reorder[t].stop([now](const uint8_t* f, size_t n) { rx_data(f, n, now); });
+    std::fprintf(stderr, "  block ack: TID %d %s t=%u.%03u", t,
+                 b.active ? "started" : "ended", now / 1000, now % 1000);
+    if (b.active) std::fprintf(stderr, " ssn=%u win=%u", b.ssn, b.win);
+    std::fprintf(stderr, "\n");
+  }
+  return g_reorder[t];
+}
+
+/* A BlockAckReq from our AP (control subtype 8): the AP will send nothing
+ * on that TID before its starting sequence number again, so the reorder
+ * buffer stops waiting for anything earlier. The BlockAck answering it is
+ * the hardware's. `f` is RA, TA, BAR Control, SSC after the 4-byte FC and
+ * duration; `len` excludes the FCS. */
+void rx_bar(const uint8_t* f, size_t len, uint32_t now) {
+  if (len < 20) return;
+  std::lock_guard<std::mutex> l(g_mu);
+  if (!g_sm.connected() || std::memcmp(f + 4, g_own, 6) != 0 ||
+      std::memcmp(f + 10, g_sm.bssid(), 6) != 0)
+    return;
+  const uint16_t ctl = (uint16_t)(f[16] | (f[17] << 8));
+  if (ctl & 0x0002) return; /* multi-TID: not offered by this station */
+  const int tid = ctl >> 12;
+  if (tid >= 8) return;
+  const uint16_t ssn = (uint16_t)((f[18] | (f[19] << 8)) >> 4);
+  reorder_follow(tid, now).bar(ssn, [now](const uint8_t* p, size_t n) {
+    rx_data(p, n, now);
+  });
+}
+
 /* THE RECEIVE DECISION, with no Packet and no radio in it, so every branch is
  * reachable from `sta_client --self-test`. `mpdu`/`len` is the MPDU without
  * its FCS (mpdu_len()). */
@@ -494,6 +545,33 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     return;
   }
 
+  /* INSIDE A BLOCK ACK AGREEMENT the frame goes through its TID's reorder
+   * buffer first and reaches rx_data in sequence order, so the host never
+   * sees TCP segments out of order (src/sta/Reorder.h). */
+  if (to_us && !group && devourer::sta::is_qos_data(fc0) &&
+      (mpdu[24] & 0x0f) < 8) {
+    devourer::sta::RxReorder& r = reorder_follow(mpdu[24] & 0x07, now);
+    if (r.active()) {
+      const uint16_t seq = (uint16_t)((mpdu[22] | (mpdu[23] << 8)) >> 4);
+      r.push(seq, mpdu, len, now, [now](const uint8_t* f, size_t n) {
+        rx_data(f, n, now);
+      });
+      return;
+    }
+  }
+  rx_data(mpdu, len, now);
+}
+
+/* One data MPDU from our AP, in order: the duplicate cache, CCMP, the replay
+ * window, EAPOL, and the host. Its framing was checked by rx_frame. Caller
+ * holds g_mu. */
+void rx_data(const uint8_t* mpdu, size_t len, uint32_t now) {
+  if (!g_sm.connected()) return;
+  const uint8_t fc0 = mpdu[0], fc1 = mpdu[1];
+  const size_t hlen = devourer::sta::data_hdr_len(fc0, fc1);
+  const bool to_us = std::memcmp(mpdu + 4, g_own, 6) == 0;
+  const bool group = (mpdu[4] & 0x01) != 0;
+  const bool amsdu = devourer::sta::is_qos_data(fc0) && (mpdu[24] & 0x80);
   const uint8_t* da = devourer::sta::data_da(mpdu, fc1);
   const uint8_t* sa = devourer::sta::data_sa(mpdu, fc1);
   /* THE QoS CONTROL FIELD IS AT A FIXED OFFSET (24), NOT AT hlen - 2: HT
@@ -936,6 +1014,10 @@ size_t mpdu_len(size_t raw, bool fcs_present) {
 void on_rx(const Packet& p) {
   const size_t mlen = mpdu_len(p.Data.size(), p.RxAtrib.fcs_present);
   if (p.RxAtrib.crc_err) { g_crc_err.fetch_add(1); return; }
+  if (p.Data[0] == 0x84 && g_ba) { /* BlockAckReq */
+    rx_bar(p.Data.data(), mlen, now_ms());
+    return;
+  }
   if (mlen < 24) { g_rx_short.fetch_add(1); return; }
   if ((p.Data[0] & 0x0c) == 0x08 && std::memcmp(p.Data.data() + 4, g_own, 6) == 0) {
     const uint16_t r = p.RxAtrib.data_rate;
@@ -1053,6 +1135,19 @@ void report() {
                g_ht ? "on" : "off", g_sm.addba_declined,
                (unsigned long long)g_amsdu_rx.load(),
                (unsigned long long)g_amsdu_sub.load());
+  {
+    unsigned long long skipped = 0, old = 0, dup = 0;
+    for (const auto& r : g_reorder) {
+      skipped += r.skipped;
+      old += r.dropped_old;
+      dup += r.dropped_dup;
+    }
+    std::fprintf(stderr,
+                 "  block ack: %s, accepted=%u, delba=%u; reorder: holes "
+                 "skipped=%llu, old=%llu, duplicate=%llu\n",
+                 g_ba ? "on" : "off", g_sm.addba_accepted, g_sm.delba_rx,
+                 skipped, old, dup);
+  }
   std::fprintf(stderr,
                "  refused before the host: fragmented=%llu, A-MSDU=%llu,"
                " short=%llu, crc_err=%llu\n",
@@ -1212,6 +1307,8 @@ int main(int argc, char** argv) {
   }
   if (const char* h = std::getenv("DEVOURER_STA_HT"))
     g_ht = *h && std::strcmp(h, "0") != 0;
+  if (const char* b = std::getenv("DEVOURER_STA_BA"))
+    g_ba = g_ht && *b && std::strcmp(b, "0") != 0;
   if (const char* a = std::getenv("DEVOURER_STA_ARM"))
     g_arm = std::strcmp(a, "0") != 0;
 
@@ -1320,6 +1417,7 @@ int main(int argc, char** argv) {
       return 1;
     }
     g_sm.set_ht(g_ht);
+    g_sm.set_block_ack(g_ba);
   }
 
   /* A TAP that was asked for and could not be opened is a refusal, not a
@@ -1454,6 +1552,11 @@ int main(int argc, char** argv) {
     {
       std::lock_guard<std::mutex> l(g_mu);
       g_sm.tick(now);
+      for (int t = 0; t < 8 && g_ba; ++t)
+        reorder_follow(t, now).timeout(now, kReorderHoldMs,
+                                       [now](const uint8_t* f, size_t n) {
+                                         rx_data(f, n, now);
+                                       });
       if (g_sm.state() != StationSm::State::Idle &&
           std::memcmp(bssid_joined, g_sm.bssid(), 6) != 0) {
         std::memcpy(bssid_joined, g_sm.bssid(), 6);

@@ -1,6 +1,6 @@
 # devourer station on macOS — Archer T3U Plus on a Mac mini 2014
 
-**Updated:** 2026-10-06 · **Phase:** 802.11n on air · **Health:** 0 drops; down 15.6 / up 4.6 Mbps vs en1 22.1 / 7.1; duplicates 47 (was ~11,000)
+**Updated:** 2026-10-06 · **Phase:** Block Ack on air · **Health:** 0 drops; down 18.9 / up 2.2 Mbps (en1 0.2 / 0.0 in the same run); upload is the weak side
 
 Goal: use the TP-Link Archer T3U Plus (RTL8822BU, `2357:0138`) as this Mac's
 Wi-Fi on macOS 12 with SIP **on**. The Realtek kext cannot load on Monterey
@@ -58,13 +58,20 @@ router ⇄ T3U Plus ⇄ libusb ⇄ sta_client ⇄ feth5000 ⇄ feth0 ⇄ macOS I
 | default route | `PrimaryRank Last` on en1 did not move it; 0/1 + 128/1 via `-ifp feth0` did. |
 | after the tick fix | 0 drops in 2 min, 1 join; down 9.4 / up 1.8 Mbps; still ~20% duplicates |
 | HT on (MCS3 up, ADDBA declined) | down 15.6 / up 4.6 Mbps (from 9.4 / 1.8); duplicates 47 of 55,922 (from 11,190); 9 ADDBA declined, 0 A-MSDU. The run's rate counter read DESC_RATE as an AX code and called every frame legacy - fixed after the run. |
+| Block Ack on | down 18.9 Mbps (16.4 as default route), up 2.2; 54,510 HT frames to 8 legacy, MCS up to 12; ~2,700 frames/s at peak; 0 duplicates, 0 MIC failures; 3 agreements, 2 DELBAs (AP idle teardown, to confirm). en1 stalled to 0.2 / 0.0 in the same run. |
 | TX power | Local limit: 200 mW EIRP in 5150–5350 MHz, the ETSI figure. The rfe_type 3 table allows 32 (ETSI) vs the 30 (MKK) world-wide min in use: +1 dB, not worth it. |
 
 ## Known limits
 
 - 802.11n (`HT=1`): HT Capabilities (20 MHz, MCS 0-15, SGI20, RX STBC) + WMM in
-  the association request; every ADDBA is declined, so no A-MPDU; A-MSDUs are
-  unpacked (with the A-MSDU-flip guard). No VHT (80 MHz is not tuned).
+  the association request; A-MSDUs are unpacked (with the A-MSDU-flip guard).
+  No VHT (80 MHz is not tuned).
+- Block Ack (`BA=1`): immediate-policy ADDBA for TID 0-7 accepted with a window
+  of up to 64; the BlockAck frames are the chip's (station arm = MACID gate,
+  docs/aggregation.md). `src/sta/Reorder.h` puts frames back in sequence order
+  before CCMP, follows BAR and DELBA, and gives up on a hole after 100 ms.
+  A-MSDU inside A-MPDU is not offered. Receive only: our own TX is not
+  aggregated.
 - One BSS by SSID, no roaming; 2.4 GHz + 5 GHz scan works after fix 1.
 - Firmware logs `LCK TIMEOUT (LO not locked!)` at bring-up; RX/TX still work.
 - TX power stays at the world-wide-minimum regulatory limit; raising it
