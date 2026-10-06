@@ -6,6 +6,8 @@
 
 - `just install` once more: the daemon label is now `local.snorkel`, and
   install.sh removes the earlier label's daemon.
+- The typed-password path of `store_psk` (network not in the Keychain) is
+  untested on a terminal.
 - Upload: rate control from TX reports instead of a fixed `TX_RATE`.
 - DNS fallback (`ensure_dns`) still to be seen on air.
 - Tailscale exit node on this Mac: untested; its 0/1 + 128/1 routes collide
@@ -13,6 +15,9 @@
 
 ## Recently done
 
+- 2026-10-06 — `just install "<ssid>" [channel]` and `just ssid`: set or
+  change the network without editing a tracked file; password from the
+  Keychain or typed. NOTICE file (GPL-2.0 §2(a)).
 - 2026-10-06 — Project README (`README.md`); devourer's README moved to
   `DEVOURER.md`.
 - 2026-10-06 — Tailscale checked over the adapter: direct path, MagicDNS OK.

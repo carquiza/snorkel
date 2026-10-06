@@ -1,0 +1,67 @@
+Snorkel
+=======
+
+Snorkel is a modified version of devourer
+(https://github.com/OpenIPC/devourer), the OpenIPC project's userspace
+Realtek Wi-Fi driver. It is distributed under the GNU General Public License,
+version 2, the same terms as devourer; see LICENSE.
+
+Forked from devourer at commit 1134df9 (October 2026).
+Snorkel changes: Copyright (C) 2026 Christopher Arquiza.
+
+All copyright and license notices in devourer's files, including Realtek's
+and the BSD-licensed MediaTek and vendor files, are unchanged. The git
+history records every change in detail; this file summarises them, as
+section 2(a) of the GPL asks.
+
+
+Files changed from devourer (October 2026)
+------------------------------------------
+
+Station client and core
+
+  tests/sta_client.cpp
+      Runs on macOS: the host side is a fake-Ethernet pair (feth), read with
+      BPF and written with NDRV, instead of a Linux TAP device. Adds 802.11n
+      association, Block Ack with receive reordering, A-MSDU unpacking, a
+      base rate for management frames, response-rate and DIG settings, and
+      a periodic link log.
+  tests/sta_client_selftest.inc, tests/station_sm_selftest.cpp
+      Tests for the above.
+  src/sta/Dot11.h
+      HT Capabilities and WMM elements; ADDBA request/response frames.
+  src/sta/StationSm.h
+      HT association and Block Ack agreements; a fix for a clock wrap that
+      reported false beacon loss.
+
+Driver
+
+  src/IRtlRadio.h, src/jaguar2/RtlJaguar2Device.{h,cpp}
+      SetResponseRates: set the rates the chip answers with (RRSR).
+  src/jaguar2/HalJaguar2.cpp
+      Sets the 5 GHz synthesizer band bits on every 5 GHz tune (a 2.4 to
+      5 GHz retune left the chip deaf); a configurable DIG ceiling.
+  src/DeviceConfig.h, examples/common/env_config.cpp
+      The DIG ceiling setting (DEVOURER_IGI_MAX).
+
+Build, tests and documentation
+
+  CMakeLists.txt
+      Builds the station client on macOS; adds the reorder test.
+  .github/workflows/
+      Adds a macOS station CI job; removes upstream's review-bot gate.
+  README.md
+      Replaced with Snorkel's README. devourer's README is DEVOURER.md,
+      unchanged except for one link to the macOS guide.
+  CLAUDE.md, src/sta/CLAUDE.md, docs/station-client.md, .gitignore
+      Notes for the changes above.
+
+
+Files added by Snorkel
+----------------------
+
+  macos/                     the daemon, install scripts, config and guide
+  justfile                   the commands
+  src/sta/Reorder.h          the Block Ack receive reorder buffer
+  tests/reorder_selftest.cpp its tests
+  DEVOURER.md, NOTICE, STATUS.md
