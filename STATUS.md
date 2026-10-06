@@ -4,8 +4,8 @@
 
 ## Now / Next
 
-- Reinstall under the new name (`just install`): it moves the old
-  `devourer-sta` install, its password and mode to `/usr/local/etc/snorkel`.
+- `just install` once more: the daemon label is now `local.snorkel`, and
+  install.sh removes the earlier label's daemon.
 - Upload: rate control from TX reports instead of a fixed `TX_RATE`.
 - DNS fallback (`ensure_dns`) still to be seen on air.
 - Tailscale exit node on this Mac: untested; its 0/1 + 128/1 routes collide
@@ -13,6 +13,8 @@
 
 ## Recently done
 
+- 2026-10-06 — Project README (`README.md`); devourer's README moved to
+  `DEVOURER.md`.
 - 2026-10-06 — Tailscale checked over the adapter: direct path, MagicDNS OK.
 - 2026-10-06 — Renamed the macOS layer to Snorkel (scripts, launchd label
   `local.snorkel`, paths, logs); SSID out of the repo config.

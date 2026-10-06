@@ -88,8 +88,8 @@ direct path to a LAN peer, MagicDNS through `utun0`). Its `100.64/10` route
 is more specific than Snorkel's half-default routes, so tailnet traffic goes
 into the tunnel and only the encrypted packets ride the adapter. Use the
 Mac's tailnet name instead of its LAN address in step 4: it stays the same
-across the switch, so a session over Tailscale reconnects by itself after a
-short pause. Not tested: using an **exit node** on this Mac. Tailscale then
+across the switch, so a session over Tailscale should reconnect by itself
+after a short pause (not yet timed). Not tested: using an **exit node** on this Mac. Tailscale then
 adds its own `0/1` and `128/1` routes, the same ones Snorkel uses.
 
 ## Modes

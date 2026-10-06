@@ -18,6 +18,15 @@ LABEL=local.snorkel
 [ -x build/sta_client ] || { echo "build/sta_client is missing - build first"; exit 1; }
 
 launchctl bootout system/$LABEL >/dev/null 2>&1
+# Any other daemon that runs this same script (an install under an earlier
+# label) would fight this one for the adapter.
+for p in /Library/LaunchDaemons/*.plist; do
+  [ "$p" = "$PLIST" ] && continue
+  grep -q "$HOME_DIR/snorkel-run.sh" "$p" 2>/dev/null || continue
+  echo "Removing $p (an earlier install under another label)"
+  launchctl bootout system "$p" >/dev/null 2>&1
+  rm -f "$p"
+done
 install -d -o root -g wheel -m 755 "$HOME_DIR" "$CONF_DIR"
 
 # An install from before the rename (devourer-sta): stop it, keep its config,

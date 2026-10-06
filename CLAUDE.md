@@ -74,7 +74,7 @@ RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3);
 the TP-Link TX50UH is RTL8832**C**U (8852C-family) despite lab lore calling it
 8832AU, while the TX20U **Nano** is RTL8852BU; RTL8733B**U** is USB and
 supported, RTL8733B**S** is the SDIO sibling and has no transport here. Full
-chip / bench-throughput table: README **Supported hardware**.
+chip / bench-throughput table: DEVOURER.md **Supported hardware** (devourer's README; README.md is Snorkel's).
 
 **PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): the RTL8821CE — the
 PCIe sibling of the 8821CU — rides the same Jaguar2 HAL through a vfio-pci
