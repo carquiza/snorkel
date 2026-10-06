@@ -8,9 +8,12 @@
   `devourer-sta` install, its password and mode to `/usr/local/etc/snorkel`.
 - Upload: rate control from TX reports instead of a fixed `TX_RATE`.
 - DNS fallback (`ensure_dns`) still to be seen on air.
+- Tailscale exit node on this Mac: untested; its 0/1 + 128/1 routes collide
+  with Snorkel's.
 
 ## Recently done
 
+- 2026-10-06 — Tailscale checked over the adapter: direct path, MagicDNS OK.
 - 2026-10-06 — Renamed the macOS layer to Snorkel (scripts, launchd label
   `local.snorkel`, paths, logs); SSID out of the repo config.
 - 2026-10-06 — Adapter mode on air: built-in Wi-Fi off, internet and DNS on
