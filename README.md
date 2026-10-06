@@ -36,18 +36,22 @@ port.
   has been tested on macOS.
 - macOS 12 on Intel (tested on a Mac mini, Late 2014). SIP can stay on.
 - Homebrew: `brew install libusb openssl@3 cmake ninja just`.
-- The network's password saved in the System keychain — joining it once with
-  the built-in Wi-Fi does that.
+- The network's password: from the System keychain if the Mac joined that
+  network before, or typed in once at install.
 
 ## Quick start
 
 ```sh
 git clone <this repository> snorkel && cd snorkel
-$EDITOR macos/snorkel.conf      # set SSID to your network's name
 just test                       # build + headless tests, no adapter needed
-just install                    # build, store the password root-only, start the daemon
+just install "MyNetwork"        # build, store the password root-only, start the daemon
 just status                     # after ~20 s, feth0 should have an address
 ```
+
+The station looks for the network on channels 36, 40, 44 and 48. If your
+network is on another channel, give it: `just install "MyNetwork" 6`.
+To join a different network later: `just ssid "OtherNetwork" [channel]`.
+`just ssid` alone shows the current one.
 
 When `just status` shows the adapter with an address, `just wifi-off` moves
 everything to it (it checks the router and the internet first). `just wifi-on`
@@ -104,4 +108,5 @@ core are devourer's work; Snorkel adds the macOS interface, the daemon and
 the scripts. devourer's own README is kept as [DEVOURER.md](DEVOURER.md).
 
 Licensed under the GNU General Public License v2.0, as devourer — see
-[LICENSE](LICENSE).
+[LICENSE](LICENSE). [NOTICE](NOTICE) lists what Snorkel changed in
+devourer's files.

@@ -19,16 +19,18 @@ switched off.
 
 ## Quick start
 
-Needs: Homebrew `libusb`, `openssl@3`, `cmake`, `ninja`, `just`; the AP's
-password saved in the System keychain (the Mac joined it once before).
+Needs: Homebrew `libusb`, `openssl@3`, `cmake`, `ninja`, `just`. The AP's
+password comes from the System keychain if the Mac joined that network
+before; otherwise the install asks for it once.
 
 ```
 git clone <this repo> snorkel && cd snorkel
-$EDITOR macos/snorkel.conf   # set SSID to your network's name
-just test             # build + headless tests, no adapter needed
-just install          # build, store the password root-only, start the daemon
-just status           # wait ~20 s: feth0 should have an address
+just test                 # build + headless tests, no adapter needed
+just install "MyNetwork"  # build, store the password root-only, start the daemon
+just status               # wait ~20 s: feth0 should have an address
 ```
+
+Not on channel 36, 40, 44 or 48? Add the channel: `just install "MyNetwork" 6`.
 
 Then, to run on the adapter alone, see [Switching over](#switching-over).
 
@@ -42,7 +44,9 @@ All from the repo root. The ones that change the system ask for your password.
 | `just build` | Build `build/sta_client` |
 | `just test` | Build and run the 8 headless station test suites |
 | `just datapath-test` | One-shot on-air test (~3 min): join, DHCP, ping, speed vs `en1`, default-route switch; writes `logs/datapath-*`. Needs the daemon stopped. |
-| `just install` | Build, install and start the daemon. Re-run after any code change. Keeps an edited config. |
+| `just install "<ssid>" [channel]` | Build, install and start the daemon. The SSID is needed the first time only; re-run `just install` after any code change. Keeps an edited config. |
+| `just ssid` | Show the network and the channels the station looks on |
+| `just ssid "<ssid>" [channel]` | Join another network: stores its password (Keychain or typed), restarts the daemon. Same SSID again re-reads a changed password. |
 | `just uninstall` | Remove the daemon, its files and the stored password; turns `en1` on |
 | `just start` / `just stop` / `just restart` | Control the installed daemon. Stopping turns `en1` on. |
 | `just status` | Daemon, mode, both interfaces, routes, DNS, last link line, last daemon lines |
@@ -110,7 +114,7 @@ Stored in `/usr/local/etc/snorkel/mode`; `just wifi-off` / `wifi-on` /
 
 | Key | Default | Meaning |
 |---|---|---|
-| `SSID` | (empty) | Network to join; required. Its password is read from the System keychain at install. |
+| `SSID` | (empty) | Network to join; set by `just install` / `just ssid`. |
 | `CHANNEL` | `48` | Channel to start on. Start in the AP's band: a 2.4 ↔ 5 GHz start costs a scan. |
 | `SCAN_CHANNELS` | `36,40,44,48` | Where to look for the AP after losing it |
 | `HT` | `1` | 802.11n association (HT Capabilities + WMM). `0` = legacy 802.11a/g. |
@@ -122,8 +126,10 @@ Stored in `/usr/local/etc/snorkel/mode`; `just wifi-off` / `wifi-on` /
 | `IFACE` | `feth0` | Host-side interface; its peer is `feth<N+5000>` |
 | `VID` / `PID` | `0x2357` / `0x0138` | The adapter's USB ID |
 
-A new SSID needs its password stored again: `just uninstall`, edit
-`macos/snorkel.conf`, `just install`.
+`just ssid "<ssid>" [channel]` changes `SSID` and stores the new password;
+with a channel it also sets `CHANNEL` and `SCAN_CHANNELS` to that one channel
+(use `just config` for a list). The repo copy keeps an empty `SSID`, so your
+network's name never ends up in a commit.
 
 ## Reading the logs
 
@@ -192,7 +198,7 @@ with mode 600), `/Library/LaunchDaemons/local.snorkel.plist`,
 
 | Symptom | Check / fix |
 |---|---|
-| `just status` shows no `feth0` address | `just link`: is there a `Connected` line? If not, the `Failed` line names the reason. Wrong password: `just uninstall`, then `just install`. |
+| `just status` shows no `feth0` address | `just link`: is there a `Connected` line? If not, the `Failed` line names the reason. Wrong or changed password: `just ssid "<ssid>"` stores it again. Not found at all: the network may be on another channel, `just ssid "<ssid>" <channel>`. |
 | `wifi-off` refused | It says why. Usually the link is still joining: wait 20 s, then `just status`. |
 | Lost the Mac after `wifi-off` | Wait 30–60 s for the failsafe, then reconnect to the built-in address. Last resort: power-cycle. |
 | `datapath-test` says the daemon holds the adapter | `just stop`, run the test, `just start` |

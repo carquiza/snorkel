@@ -24,7 +24,7 @@ if [ -r /usr/local/etc/snorkel/snorkel.conf ]; then
 else
   . macos/snorkel.conf
 fi
-if [ -z "$SSID" ]; then echo "No SSID set in macos/snorkel.conf"; exit 1; fi
+if [ -z "$SSID" ]; then echo "No network set. Install first: just install \"<ssid>\""; exit 1; fi
 . macos/snorkel-lib.sh
 mkdir -p logs
 CLOG=logs/datapath-client.log

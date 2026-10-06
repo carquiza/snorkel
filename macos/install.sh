@@ -1,6 +1,12 @@
 #!/bin/bash
-# Install Snorkel as a launchd daemon. Run with sudo from the
-# repo after a build: sudo macos/install.sh
+# Install Snorkel as a launchd daemon. Run with sudo from the repo after a
+# build (`just install` does both):
+#
+#   sudo macos/install.sh [ssid [channel]]
+#
+# The SSID is required on the first install; later runs keep the installed
+# one unless a new one is given. The channel is where the network is (see
+# snorkel-ssid.sh).
 #
 # Copies the binary and scripts to root-owned places (so nothing a normal
 # user can edit runs as root), stores the Wi-Fi password in a root-only file
@@ -9,6 +15,12 @@
 set -u
 if [ "$(id -u)" != 0 ]; then echo "Run it with sudo: sudo $0"; exit 1; fi
 cd "$(dirname "$0")/.." || exit 1
+. macos/snorkel-lib.sh
+NEW_SSID="${1:-}"
+NEW_CHANNEL="${2:-}"
+if [ -n "$NEW_CHANNEL" ] && ! valid_channel "$NEW_CHANNEL"; then
+  echo "Not a Wi-Fi channel: $NEW_CHANNEL"; exit 2
+fi
 
 HOME_DIR=/usr/local/libexec/snorkel
 CONF_DIR=/usr/local/etc/snorkel
@@ -47,8 +59,7 @@ fi
 install -o root -g wheel -m 755 build/sta_client "$HOME_DIR/sta_client"
 install -o root -g wheel -m 755 macos/snorkel-run.sh "$HOME_DIR/snorkel-run.sh"
 install -o root -g wheel -m 644 macos/snorkel-lib.sh "$HOME_DIR/snorkel-lib.sh"
-# An installed config without an SSID is replaced, so editing the repo copy
-# and re-running works on a first install.
+# An installed config without an SSID is replaced by the default.
 if [ -f "$CONF_DIR/snorkel.conf" ] &&
    ! cmp -s macos/snorkel.conf "$CONF_DIR/snorkel.conf" &&
    ( . "$CONF_DIR/snorkel.conf"; [ -n "$SSID" ] ); then
@@ -58,20 +69,23 @@ else
   install -o root -g wheel -m 644 macos/snorkel.conf "$CONF_DIR/snorkel.conf"
 fi
 
+if [ -n "$NEW_SSID" ]; then
+  # A different network needs its own password.
+  [ "$( . "$CONF_DIR/snorkel.conf"; echo "$SSID")" = "$NEW_SSID" ] || rm -f "$CONF_DIR/psk"
+  set_conf "$CONF_DIR/snorkel.conf" SSID "$NEW_SSID"
+fi
+if [ -n "$NEW_CHANNEL" ]; then
+  set_conf "$CONF_DIR/snorkel.conf" CHANNEL "$NEW_CHANNEL"
+  set_conf "$CONF_DIR/snorkel.conf" SCAN_CHANNELS "$NEW_CHANNEL"
+fi
+
 . "$CONF_DIR/snorkel.conf"
 if [ -z "$SSID" ]; then
-  echo "No SSID set. Put your network's name in macos/snorkel.conf and run this again."
+  echo "No network set. Install with your network's name: just install \"<ssid>\""
   exit 1
 fi
 if [ ! -s "$CONF_DIR/psk" ]; then
-  echo "Reading the $SSID password from the Keychain (approve the dialog if one shows)."
-  PSK="$(security find-generic-password -D 'AirPort network password' \
-    -a "$SSID" -w /Library/Keychains/System.keychain 2>/dev/null)"
-  if [ -z "$PSK" ]; then echo "No password read for $SSID. Stopped."; exit 1; fi
-  ( umask 077; printf '%s' "$PSK" > "$CONF_DIR/psk" )
-  unset PSK
-  chown root:wheel "$CONF_DIR/psk"
-  chmod 600 "$CONF_DIR/psk"
+  store_psk "$SSID" "$CONF_DIR/psk" || { echo "Stopped."; exit 1; }
 fi
 
 [ -f "$CONF_DIR/mode" ] || echo auto > "$CONF_DIR/mode"
@@ -81,4 +95,5 @@ touch /var/log/snorkel.log /var/log/snorkel-daemon.log
 chmod 644 /var/log/snorkel.log /var/log/snorkel-daemon.log
 launchctl bootstrap system "$PLIST" && launchctl enable system/$LABEL
 echo "Installed and started. Logs: /var/log/snorkel.log and /var/log/snorkel-daemon.log"
-echo "Mode: $(cat "$CONF_DIR/mode"). Check it with: just status"
+echo "Network: $SSID (channels $SCAN_CHANNELS). Mode: $(cat "$CONF_DIR/mode")."
+echo "Check it in about 20 s with: just status"

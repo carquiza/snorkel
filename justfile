@@ -28,9 +28,13 @@ test: build
 datapath-test: build
     sudo macos/sta-datapath-test.sh
 
-# Build, then install and start the launchd daemon (re-run after any change).
-install: build
-    sudo macos/install.sh
+# Build, install and start the daemon. First time: just install "<ssid>" [channel]. Re-run after any change.
+install ssid="" channel="": build
+    sudo macos/install.sh {{quote(ssid)}} {{quote(channel)}}
+
+# Show the network, or join another: just ssid "<ssid>" [channel] (reads its password, restarts).
+ssid name="" channel="":
+    @if [ -z {{quote(name)}} ]; then macos/snorkel-ssid.sh; else sudo macos/snorkel-ssid.sh {{quote(name)}} {{quote(channel)}}; fi
 
 # Stop the daemon and remove everything it installed; the built-in Wi-Fi is turned on.
 uninstall:
