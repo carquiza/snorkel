@@ -4,8 +4,7 @@
 
 ## Now / Next
 
-- `just install` once more: the daemon label is now `local.snorkel`, and
-  install.sh removes the earlier label's daemon.
+- Check the first `snorkel-macos` CI run on GitHub.
 - The typed-password path of `store_psk` (network not in the Keychain) is
   untested on a terminal.
 - Upload: rate control from TX reports instead of a fixed `TX_RATE`.
@@ -15,6 +14,8 @@
 
 ## Recently done
 
+- 2026-10-06 — Published to https://github.com/carquiza/snorkel (public,
+  GPL-2.0). Daemon reinstalled as `local.snorkel`; rejoined in 21 s.
 - 2026-10-06 — `just install "<ssid>" [channel]` and `just ssid`: set or
   change the network without editing a tracked file; password from the
   Keychain or typed. NOTICE file (GPL-2.0 §2(a)).
