@@ -1,12 +1,12 @@
 #!/bin/bash
-# The devourer station daemon body, run by launchd as root.
+# The Snorkel daemon body, run by launchd as root.
 #
 # Loops sta_client (it creates feth0 and joins), keeps DHCP on feth0, routes
 # internet traffic through feth0 while the router answers there, and - in
 # adapter mode - turns the built-in Wi-Fi off, with a failsafe that turns it
 # back on when the adapter stops working. Full description: macos/README.md.
 #
-# Modes ($CONF_DIR/mode, written by macos/devourer-sta-mode.sh):
+# Modes ($CONF_DIR/mode, written by macos/snorkel-mode.sh):
 #   auto     built-in Wi-Fi on; internet via the adapter while it is healthy
 #   adapter  as auto, and the built-in Wi-Fi off while the adapter is healthy
 #   builtin  built-in Wi-Fi on; the adapter stays joined but carries nothing
@@ -16,12 +16,12 @@
 # for the ipconfig-only feth0 service. LAN traffic stays on the built-in Wi-Fi
 # while it is on.
 set -u
-HOME_DIR=/usr/local/libexec/devourer-sta
-CONF_DIR=/usr/local/etc/devourer-sta
-LOG=/var/log/devourer-sta.log
+HOME_DIR=/usr/local/libexec/snorkel
+CONF_DIR=/usr/local/etc/snorkel
+LOG=/var/log/snorkel.log
 MODE_FILE="$CONF_DIR/mode"
-. "$CONF_DIR/devourer-sta.conf"
-. "$HOME_DIR/devourer-sta-lib.sh"
+. "$CONF_DIR/snorkel.conf"
+. "$HOME_DIR/snorkel-lib.sh"
 
 PSK="$(cat "$CONF_DIR/psk" 2>/dev/null)"
 if [ -z "$PSK" ]; then echo "no PSK in $CONF_DIR/psk"; sleep 60; exit 1; fi

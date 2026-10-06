@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.openipc.devourer-sta</string>
+  <string>local.snorkel</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/libexec/devourer-sta/devourer-sta-run.sh</string>
+    <string>/usr/local/libexec/snorkel/snorkel-run.sh</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -15,8 +15,8 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>
-  <string>/var/log/devourer-sta-daemon.log</string>
+  <string>/var/log/snorkel-daemon.log</string>
   <key>StandardErrorPath</key>
-  <string>/var/log/devourer-sta-daemon.log</string>
+  <string>/var/log/snorkel-daemon.log</string>
 </dict>
 </plist>

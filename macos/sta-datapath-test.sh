@@ -14,12 +14,18 @@
 set -u
 if [ "$(id -u)" != 0 ]; then echo "Run it with sudo: sudo $0"; exit 1; fi
 cd "$(dirname "$0")/.." || exit 1
-if pgrep -f devourer-sta-run.sh >/dev/null; then
-  echo "The devourer-sta daemon holds the adapter. Stop it first: just stop"
+if pgrep -f snorkel-run.sh >/dev/null; then
+  echo "The Snorkel daemon holds the adapter. Stop it first: just stop"
   exit 1
 fi
-. macos/devourer-sta.conf
-. macos/devourer-sta-lib.sh
+# The installed config if there is one (it has your SSID), else the repo copy.
+if [ -r /usr/local/etc/snorkel/snorkel.conf ]; then
+  . /usr/local/etc/snorkel/snorkel.conf
+else
+  . macos/snorkel.conf
+fi
+if [ -z "$SSID" ]; then echo "No SSID set in macos/snorkel.conf"; exit 1; fi
+. macos/snorkel-lib.sh
 mkdir -p logs
 CLOG=logs/datapath-client.log
 SUM=logs/datapath-summary.txt
@@ -79,7 +85,7 @@ upload() {
     --data-binary @logs/upload.bin "$UL_URL"
 }
 
-say "== devourer data path test $(date '+%F %T') =="
+say "== Snorkel data path test $(date '+%F %T') =="
 say "built-in $WIFI_DEV: $(/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport -I | awk '/agrCtlRSSI/{r=$2}/lastTxRate/{t=$2}END{print "rssi " r " dBm, tx " t " Mbps"}')"
 say "default route before: $(default_route_if)"
 

@@ -19,3 +19,7 @@ INVENTORY.md
 # Bench-local UHD radio selection (tests/uhd_select.py) — serials are
 # per-bench, never committed.
 tests/.uhd_args
+
+# Local run output (macos/sta-datapath-test.sh, ad-hoc captures)
+logs/
+scratch/

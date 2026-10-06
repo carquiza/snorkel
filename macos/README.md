@@ -1,12 +1,15 @@
-# devourer station on macOS — Archer T3U Plus on a Mac mini 2014
+# Snorkel — a USB Wi-Fi adapter as an old Mac's Wi-Fi, with no kext
 
-**Updated:** 2026-10-07 · **Phase:** daemon + switch-over commands, not yet run on air · **Health:** link proven on air — 0 drops, down 18.9 / up 2.2 Mbps with 802.11n + Block Ack; upload is the weak side
-
-This makes a TP-Link **Archer T3U Plus** (RTL8822BU, USB `2357:0138`) the Wi-Fi
+Snorkel makes a TP-Link **Archer T3U Plus** (AC1300, RTL8822BU, USB `2357:0138`) the Wi-Fi
 of a Mac mini 2014 on **macOS 12 with SIP on**. TP-Link's Realtek kext cannot
 load on Monterey without SIP off, and SIP can only be changed from Recovery,
-which needs a keyboard and screen this headless Mac does not have. devourer
+which needs a keyboard and screen this headless Mac does not have. Snorkel
 drives the chip from user space over libusb instead: no kext, no SIP change.
+
+Snorkel is a fork of [devourer](https://github.com/OpenIPC/devourer), the
+OpenIPC userspace Realtek driver. The radio driver and the station core are
+devourer's; Snorkel adds the macOS interface, the daemon and the scripts in
+this directory. Licence: GPL-2.0, as devourer.
 
 The station client (`tests/sta_client.cpp`) scans, joins with WPA2-PSK, runs
 CCMP in software, and hands Ethernet frames to macOS through a fake-Ethernet
@@ -20,7 +23,8 @@ Needs: Homebrew `libusb`, `openssl@3`, `cmake`, `ninja`, `just`; the AP's
 password saved in the System keychain (the Mac joined it once before).
 
 ```
-cd ~/Source/devourer
+git clone <this repo> snorkel && cd snorkel
+$EDITOR macos/snorkel.conf   # set SSID to your network's name
 just test             # build + headless tests, no adapter needed
 just install          # build, store the password root-only, start the daemon
 just status           # wait ~20 s: feth0 should have an address
@@ -87,17 +91,17 @@ traffic uses the adapter.
 | `adapter` | off while the adapter is healthy | adapter | adapter |
 | `builtin` | on | built-in | built-in |
 
-Stored in `/usr/local/etc/devourer-sta/mode`; `just wifi-off` / `wifi-on` /
+Stored in `/usr/local/etc/snorkel/mode`; `just wifi-off` / `wifi-on` /
 `use-builtin` write it.
 
 ## Configuration
 
-`macos/devourer-sta.conf` is the default; the installed copy is
-`/usr/local/etc/devourer-sta/devourer-sta.conf` (`just config`).
+`macos/snorkel.conf` is the default; the installed copy is
+`/usr/local/etc/snorkel/snorkel.conf` (`just config`).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `SSID` | `MyNetwork` | Network to join. Its password is read from the System keychain at install. |
+| `SSID` | (empty) | Network to join; required. Its password is read from the System keychain at install. |
 | `CHANNEL` | `48` | Channel to start on. Start in the AP's band: a 2.4 ↔ 5 GHz start costs a scan. |
 | `SCAN_CHANNELS` | `36,40,44,48` | Where to look for the AP after losing it |
 | `HT` | `1` | 802.11n association (HT Capabilities + WMM). `0` = legacy 802.11a/g. |
@@ -110,11 +114,11 @@ Stored in `/usr/local/etc/devourer-sta/mode`; `just wifi-off` / `wifi-on` /
 | `VID` / `PID` | `0x2357` / `0x0138` | The adapter's USB ID |
 
 A new SSID needs its password stored again: `just uninstall`, edit
-`macos/devourer-sta.conf`, `just install`.
+`macos/snorkel.conf`, `just install`.
 
 ## Reading the logs
 
-`/var/log/devourer-sta.log` is the client; `/var/log/devourer-sta-daemon.log`
+`/var/log/snorkel.log` is the client; `/var/log/snorkel-daemon.log`
 is the daemon (routes, Wi-Fi power, DNS, restarts). The client log restarts
 at 20 MB (the old one is kept as `.1`).
 
@@ -170,10 +174,10 @@ AP ⇄ T3U Plus ⇄ libusb ⇄ sta_client ⇄ feth5000 ⇄ feth0 ⇄ macOS IP st
   daemon publishes `feth0`'s DHCP answers as its own network service in the
   dynamic store, the way VPN up-scripts do.
 
-**Installed files:** `/usr/local/libexec/devourer-sta/` (binary, daemon,
-helpers; root-owned), `/usr/local/etc/devourer-sta/` (config, mode, and `psk`
-with mode 600), `/Library/LaunchDaemons/com.openipc.devourer-sta.plist`,
-`/var/log/devourer-sta*.log`.
+**Installed files:** `/usr/local/libexec/snorkel/` (binary, daemon,
+helpers; root-owned), `/usr/local/etc/snorkel/` (config, mode, and `psk`
+with mode 600), `/Library/LaunchDaemons/local.snorkel.plist`,
+`/var/log/snorkel*.log`.
 
 ## Troubleshooting
 
@@ -198,12 +202,11 @@ with mode 600), `/Library/LaunchDaemons/com.openipc.devourer-sta.plist`,
   `DEVOURER_STA_BASE_RATE`, `DEVOURER_STA_ACK_RATES`, `DEVOURER_STA_HT`,
   `DEVOURER_STA_BA`, `DEVOURER_STA_LINK_LOG`, `DEVOURER_STA_SCAN_LOG`, and
   `DEVOURER_IGI_MAX` (library). By hand:
-  `sudo DEVOURER_STA_PSK=... DEVOURER_VID=0x2357 DEVOURER_PID=0x0138 DEVOURER_CHANNEL=48 DEVOURER_STA_SSID=MyNetwork DEVOURER_STA_TAP=feth0 build/sta_client 60`
-- Work is on the local branch `macos-sta-spike`.
+  `sudo DEVOURER_STA_PSK=... DEVOURER_VID=0x2357 DEVOURER_PID=0x0138 DEVOURER_CHANNEL=48 DEVOURER_STA_SSID=<ssid> DEVOURER_STA_TAP=feth0 build/sta_client 60`
 
 ## Measurements (on air, 2026-10-05 / 06)
 
-AP `MyNetwork` on channel 48 at about -70 dBm to the adapter; the built-in Wi-Fi
+The home AP on channel 48 at about -70 dBm to the adapter; the built-in Wi-Fi
 saw it at -77 dBm.
 
 | Run | Result |
@@ -225,5 +228,6 @@ saw it at -77 dBm.
   no rate control from TX reports yet.
 - No VHT (802.11ac): the radio tunes 20 MHz only. No TX aggregation.
 - One BSS by SSID, no roaming. PMF (802.11w) and WPA3 are not supported.
-- `wifi-off` and the DNS fallback are written but not yet run on air.
+- The DNS fallback is written but not yet triggered on air: in the first
+  adapter-mode run (2026-10-06) macOS kept its DNS after `en1` went off.
 - The firmware logs `LCK TIMEOUT (LO not locked!)` at bring-up; RX and TX work.

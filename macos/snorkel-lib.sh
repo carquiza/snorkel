@@ -1,4 +1,4 @@
-# Shared helpers for the devourer station scripts. Sourced, not run.
+# Shared helpers for Snorkel scripts. Sourced, not run.
 # All functions need root except the read-only ones.
 
 # The built-in Wi-Fi device (en1 on a Mac mini 2014).

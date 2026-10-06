@@ -1,9 +1,9 @@
 #!/bin/bash
-# Set how the devourer station daemon uses the built-in Wi-Fi. Run with sudo.
+# Set how the Snorkel daemon uses the built-in Wi-Fi. Run with sudo.
 #
-#   devourer-sta-mode.sh adapter   built-in Wi-Fi off, the adapter carries everything
-#   devourer-sta-mode.sh auto      built-in Wi-Fi on, internet via the adapter (default)
-#   devourer-sta-mode.sh builtin   built-in Wi-Fi on and carrying everything
+#   snorkel-mode.sh adapter   built-in Wi-Fi off, the adapter carries everything
+#   snorkel-mode.sh auto      built-in Wi-Fi on, internet via the adapter (default)
+#   snorkel-mode.sh builtin   built-in Wi-Fi on and carrying everything
 #
 # The daemon applies the mode within 5 s. "adapter" is refused unless the
 # adapter is joined, has an address and reaches both the router and the
@@ -13,10 +13,10 @@
 # no internet for 30 s (then it also falls back to "auto").
 set -u
 if [ "$(id -u)" != 0 ]; then echo "Run it with sudo: sudo $0 $*"; exit 1; fi
-CONF_DIR=/usr/local/etc/devourer-sta
+CONF_DIR=/usr/local/etc/snorkel
 HERE="$(cd "$(dirname "$0")" && pwd)"
-. "$CONF_DIR/devourer-sta.conf" 2>/dev/null || { echo "Not installed (no $CONF_DIR). Run: just install"; exit 1; }
-. "$HERE/devourer-sta-lib.sh"
+. "$CONF_DIR/snorkel.conf" 2>/dev/null || { echo "Not installed (no $CONF_DIR). Run: just install"; exit 1; }
+. "$HERE/snorkel-lib.sh"
 
 want="${1:-}"
 case "$want" in
@@ -24,7 +24,7 @@ case "$want" in
   *) echo "usage: $0 auto|adapter|builtin"; exit 2 ;;
 esac
 
-if ! pgrep -f devourer-sta-run.sh >/dev/null; then
+if ! pgrep -f snorkel-run.sh >/dev/null; then
   echo "The daemon is not running. Start it first: just start"
   exit 1
 fi

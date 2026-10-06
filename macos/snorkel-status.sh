@@ -1,24 +1,24 @@
 #!/bin/bash
-# One screen of the devourer station's state. No root needed.
+# One screen of Snorkel's state. No root needed.
 set -u
-CONF_DIR=/usr/local/etc/devourer-sta
-LOG=/var/log/devourer-sta.log
-DLOG=/var/log/devourer-sta-daemon.log
+CONF_DIR=/usr/local/etc/snorkel
+LOG=/var/log/snorkel.log
+DLOG=/var/log/snorkel-daemon.log
 HERE="$(cd "$(dirname "$0")" && pwd)"
-. "$HERE/devourer-sta-lib.sh"
+. "$HERE/snorkel-lib.sh"
 IFACE=feth0
-[ -r "$CONF_DIR/devourer-sta.conf" ] && . "$CONF_DIR/devourer-sta.conf"
+[ -r "$CONF_DIR/snorkel.conf" ] && . "$CONF_DIR/snorkel.conf"
 WIFI_DEV=$(builtin_wifi_dev)
 
 yn() { [ -n "$1" ] && echo "$1" || echo "-"; }
 
-echo "== devourer station =="
+echo "== Snorkel =="
 if [ -d "$CONF_DIR" ]; then
   echo "installed:        yes ($CONF_DIR)"
 else
   echo "installed:        no  (just install)"
 fi
-echo "daemon:           $(pgrep -f devourer-sta-run.sh >/dev/null && echo running || echo stopped)"
+echo "daemon:           $(pgrep -f snorkel-run.sh >/dev/null && echo running || echo stopped)"
 echo "sta_client:       $(yn "$(pgrep -x sta_client | head -1)")"
 echo "mode:             $(cat "$CONF_DIR/mode" 2>/dev/null || echo auto)"
 echo "built-in Wi-Fi:   $WIFI_DEV $(wifi_power "$WIFI_DEV")  $(ipconfig getifaddr "$WIFI_DEV" 2>/dev/null)"

@@ -1,3 +1,19 @@
+# Snorkel
+
+**A TP-Link Archer T3U Plus (AC1300) as the Wi-Fi of an old Mac — no kext, SIP on.**
+
+Snorkel runs a WPA2 802.11n station in user space over libusb and hands its
+traffic to macOS through a fake-Ethernet interface, with a launchd daemon that
+keeps it up and routes the internet over it. It exists for Macs where the
+vendor kext cannot load (macOS 12 with SIP on). Setup, commands and
+measurements: **[macos/README.md](macos/README.md)**.
+
+Snorkel is a fork of [devourer](https://github.com/OpenIPC/devourer); the
+driver and the station core below are devourer's work. devourer's own README
+follows unchanged.
+
+---
+
 # devourer
 
 **The Realtek Wi-Fi driver that simply devours its competitors.**

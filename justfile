@@ -1,4 +1,4 @@
-# The devourer station on macOS: an Archer T3U Plus (RTL8822BU) as this Mac's
+# Snorkel on macOS: an Archer T3U Plus (RTL8822BU) as this Mac's
 # Wi-Fi, with no kext and SIP on. Full guide: macos/README.md.
 #
 # Recipes that change the system ask for your password (sudo).
@@ -38,41 +38,41 @@ uninstall:
 
 # Start the installed daemon.
 start:
-    sudo launchctl bootstrap system /Library/LaunchDaemons/com.openipc.devourer-sta.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/local.snorkel.plist
 
 # Stop the daemon (the built-in Wi-Fi is turned on as it stops).
 stop:
-    sudo launchctl bootout system/com.openipc.devourer-sta
+    sudo launchctl bootout system/local.snorkel
 
 # Restart the daemon (re-reads the config).
 restart:
-    sudo launchctl kickstart -k system/com.openipc.devourer-sta
+    sudo launchctl kickstart -k system/local.snorkel
 
 # Show the daemon, the mode, both Wi-Fi interfaces, routes, DNS and the last link line.
 status:
-    @macos/devourer-sta-status.sh
+    @macos/snorkel-status.sh
 
 # Follow the station and daemon logs.
 logs:
-    tail -F /var/log/devourer-sta.log /var/log/devourer-sta-daemon.log
+    tail -F /var/log/snorkel.log /var/log/snorkel-daemon.log
 
 # Follow only the state changes and the 2 s link lines.
 link:
-    tail -F /var/log/devourer-sta.log | grep --line-buffered -E "station state|link:|block ack: TID"
+    tail -F /var/log/snorkel.log | grep --line-buffered -E "station state|link:|block ack: TID"
 
 # Switch to the adapter and turn the built-in Wi-Fi off (checked first; failsafe back on).
 wifi-off:
-    sudo macos/devourer-sta-mode.sh adapter
+    sudo macos/snorkel-mode.sh adapter
 
 # Turn the built-in Wi-Fi back on; internet stays on the adapter while it is healthy.
 wifi-on:
-    sudo macos/devourer-sta-mode.sh auto
+    sudo macos/snorkel-mode.sh auto
 
 # Built-in Wi-Fi on and carrying all traffic; the adapter stays joined but idle.
 use-builtin:
-    sudo macos/devourer-sta-mode.sh builtin
+    sudo macos/snorkel-mode.sh builtin
 
 # Open the installed config in an editor, then restart the daemon.
 config:
-    sudo "${EDITOR:-nano}" /usr/local/etc/devourer-sta/devourer-sta.conf
-    sudo launchctl kickstart -k system/com.openipc.devourer-sta
+    sudo "${EDITOR:-nano}" /usr/local/etc/snorkel/snorkel.conf
+    sudo launchctl kickstart -k system/local.snorkel
